@@ -27,9 +27,10 @@ E.M.B.E.R Engine is a personal cognitive architecture — it's opinionated by de
 ## Setup
 
 ```bash
-git clone https://github.com/yourusername/ember-engine.git ~/claude_memory
+git clone https://github.com/BobbyDigitalDev/claude-cowork-memory-ember.git ~/claude_memory
 cd ~/claude_memory
 pip install -r requirements.txt --break-system-packages
+pip install -r requirements-dev.txt  # pytest and dev tooling
 python3 scripts/setup_db.py   # creates memory.db with full schema
 ```
 
