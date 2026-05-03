@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+  <!-- Job label: must be unique on the system -->
+  <key>Label</key>
+  <string>com.ember-engine.context-agent</string>
+
+  <!-- Command to run -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__INSTALL_DIR__/scripts/context_snapshot_agent.py</string>
+    <string>--quiet</string>
+  </array>
+
+  <!-- Run daily at 10:00 AM local time -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>10</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <!-- If the Mac was asleep at 05:00, run as soon as it wakes -->
+  <!-- Note: launchd does NOT support RunAfterSleep natively.      -->
+  <!-- The job will fire the next scheduled time after wake.        -->
+  <!-- To get on-wake behavior, see install_context_agent.sh notes. -->
+
+  <!-- Log stdout/stderr to dated files alongside agent logs -->
+  <key>StandardOutPath</key>
+  <string>__INSTALL_DIR__/logs/context_agent_launchd.out</string>
+
+  <key>StandardErrorPath</key>
+  <string>__INSTALL_DIR__/logs/context_agent_launchd.err</string>
+
+  <!-- Run as the logged-in user (no sudo needed) -->
+  <!-- Set working directory to avoid any path ambiguity -->
+  <key>WorkingDirectory</key>
+  <string>__INSTALL_DIR__</string>
+
+  <!-- Keep job alive only if it crashes unexpectedly -->
+  <key>KeepAlive</key>
+  <false/>
+
+  <!-- Do NOT run immediately on load (run on schedule only) -->
+  <key>RunAtLoad</key>
+  <false/>
+
+</dict>
+</plist>

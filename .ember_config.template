@@ -1,0 +1,8 @@
+# cowork-memory configuration
+# Copy this to .ember_config and fill in your values.
+# setup.sh generates this automatically on a fresh install.
+# To reconfigure, re-run setup.sh or edit this file directly.
+
+USERNAME=your_name
+INSTALL_DIR=/path/to/claude_memory
+EMAIL=your_email@example.com

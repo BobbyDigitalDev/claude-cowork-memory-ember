@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ember-engine.backup-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__INSTALL_DIR__/scripts/backup_memory.py</string>
+    </array>
+
+    <!-- Run every 6 hours (21600 seconds) -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
+
+    <!-- Do NOT run immediately on load, wait for first interval -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/backup_agent_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/backup_agent_stderr.log</string>
+
+    <!-- Restart automatically if it exits with a non-zero code -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>300</integer>
+</dict>
+</plist>

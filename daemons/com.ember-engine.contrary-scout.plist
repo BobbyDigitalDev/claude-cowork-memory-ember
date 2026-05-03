@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ember-engine.contrary-scout</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__INSTALL_DIR__/scripts/research_scout.py</string>
+        <string>--contrary</string>
+        <string>--no-jitter</string>
+    </array>
+
+    <!-- Run on the 1st of each month at 2pm -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Day</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>14</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/contrary_scout_stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/contrary_scout_stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+
+    <key>Label</key>
+    <string>com.ember-engine.ingest-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>__INSTALL_DIR__/scripts/ingest_agent.py</string>
+    </array>
+
+    <!-- Run daily at 11am. If the machine is asleep at 11am, launchd fires
+         the job shortly after the next wake. Scheduled 1 hour before the
+         Research Scout (noon) so new scout results aren't in the queue yet
+         when this runs — keeping the two agents from overlapping. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>11</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Do not run immediately on load (only on schedule) -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__INSTALL_DIR__/logs/ingest_launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__INSTALL_DIR__/logs/ingest_launchd_error.log</string>
+
+    <!-- Restart policy: do not retry on crash (daily schedule handles next run) -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>3600</integer>
+
+</dict>
+</plist>

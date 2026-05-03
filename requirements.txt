@@ -1,0 +1,19 @@
+# cowork-memory runtime dependencies
+#
+# Install with:
+#   pip install -r requirements.txt
+#
+# All other dependencies (sqlite3, subprocess, json, etc.) are Python stdlib.
+# Requires Python 3.10+ and Ollama running locally.
+
+# HTTP client — used by all Ollama API calls (embed, extract, verify, scout)
+requests>=2.28
+
+# MCP server — used by memory_mcp_server.py to expose the memory DB
+# to Claude as a live tool during Cowork sessions (install_memory_mcp.sh)
+mcp>=1.0
+
+# YouTube transcript fetching (optional — only needed if using fetch_youtube_transcript.py)
+# Install separately if you plan to ingest YouTube content:
+#   pip install youtube-transcript-api
+# youtube-transcript-api>=0.6
