@@ -1,5 +1,7 @@
 # ember-engine
 
+**E**volving **M**emory-**B**ased **E**xperience and **R**easoning
+
 A persistent cognitive architecture for Claude CoWork. Gives Claude a memory that carries forward across sessions — beliefs, epiphanies, research, patterns, and goals — so you're never starting from scratch.
 
 Built specifically for [Claude CoWork](https://claude.ai). Not compatible with Claude Code or the web interface.
