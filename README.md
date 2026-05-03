@@ -29,7 +29,7 @@ Over time, the system builds a semantic memory you can query ("what did we decid
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/ember-engine.git ~/claude_memory
+git clone https://github.com/BobbyDigitalDev/claude-cowork-memory-ember.git ~/claude_memory
 cd ~/claude_memory
 chmod +x setup.sh
 ./setup.sh
