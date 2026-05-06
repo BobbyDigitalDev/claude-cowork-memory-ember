@@ -385,9 +385,52 @@ def render(state: dict, generated_at: datetime) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ── Live schema helpers ───────────────────────────────────────────────────────
+
+# Tables referenced directly by the SESSION OPEN PROTOCOL.
+# Schema is injected into ember_engine_context.md so Claude always reads
+# the real column list rather than relying on instructions prose.
+SCHEMA_TABLES = [
+    "processing_jobs",
+    "goals",
+    "scout_results",
+    "beliefs",
+    "questions",
+    "sessions",
+    "memory_chunks",
+    "tensions",
+]
+
+
+def gather_live_schema(conn: sqlite3.Connection) -> str:
+    """
+    Query PRAGMA table_info for each table in SCHEMA_TABLES and return
+    a formatted markdown block for injection into ember_engine_context.md.
+    Tables that do not exist are noted as '(not yet created)'.
+    """
+    lines = []
+    lines.append("## Live Schema — SESSION OPEN PROTOCOL reference tables")
+    lines.append("Auto-generated from memory.db at context build time.")
+    lines.append("Use these column lists for any DB query. Do not rely on column names")
+    lines.append("from instructions prose — instructions may lag behind schema changes.")
+    lines.append("")
+
+    for table in SCHEMA_TABLES:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if rows:
+            col_names = ", ".join(r[1] for r in rows)
+            lines.append(f"**{table}:** {col_names}")
+        else:
+            lines.append(f"**{table}:** (not yet created — agent not built)")
+
+    lines.append("")
+    lines.append("_Verify any column at runtime: `PRAGMA table_info(<table>)`_")
+    return "\n".join(lines)
+
+
 # ── ember_engine_context.md builder ─────────────────────────────────────────────────
 
-def build_ember_context(generated_at: datetime) -> str:
+def build_ember_context(generated_at: datetime, schema_block: str = "") -> str:
     """
     Concatenate ember_engine_instructions.md + recent_memory.md + deep_memory.md
     into a single file for Claude to read at session open.
@@ -395,6 +438,7 @@ def build_ember_context(generated_at: datetime) -> str:
     Includes:
       - DO NOT EDIT header with regeneration instructions
       - Staleness warnings for any source file older than STALENESS_HOURS
+      - Live schema block (from memory.db) so Claude has correct column names
       - Clear section dividers so Claude knows which section it is reading
     """
     now_ts = generated_at.timestamp()
@@ -425,6 +469,15 @@ def build_ember_context(generated_at: datetime) -> str:
         for w in stale_warnings:
             lines.append(f"     {w}")
         lines.append("-->")
+        lines.append("")
+
+    # Inject live schema before standing instructions so Claude reads real
+    # column names before encountering any DB query examples in the instructions.
+    if schema_block:
+        lines.append("<!-- ===== SECTION: LIVE SCHEMA (auto-generated from memory.db) ===== -->")
+        lines.append("")
+        lines.append(schema_block)
+        lines.append("")
         lines.append("")
 
     for source_path, section_label in CONTEXT_SOURCES:
@@ -468,6 +521,7 @@ def main():
 
     conn = sqlite3.connect(DB_PATH)
     state = gather_state(conn, session_date)
+    schema_block = gather_live_schema(conn)
     conn.close()
 
     # ── Write START_HERE.md ──
@@ -479,7 +533,7 @@ def main():
         if not args.skip_context:
             ctx_path = Path(args.context_out)
             ctx_path.parent.mkdir(parents=True, exist_ok=True)
-            ctx_path.write_text(build_ember_context(NOW))
+            ctx_path.write_text(build_ember_context(NOW, schema_block))
             print(f"[ember_engine_context.md written to {ctx_path}]", file=sys.stderr)
         return
 
@@ -495,7 +549,7 @@ def main():
     if not args.skip_context:
         ctx_path = Path(args.context_out)
         ctx_path.parent.mkdir(parents=True, exist_ok=True)
-        ctx_context = build_ember_context(NOW)
+        ctx_context = build_ember_context(NOW, schema_block)
         ctx_path.write_text(ctx_context)
         missing = [s.name for s, _ in CONTEXT_SOURCES if not s.exists()]
         stale   = [s.name for s, _ in CONTEXT_SOURCES

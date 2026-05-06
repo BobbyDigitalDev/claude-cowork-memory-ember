@@ -478,7 +478,7 @@ def load_memory_chunks(conn):
 def score_against_memory(abstract, chunks):
     """
     Embed the abstract and return the max cosine similarity against all chunks.
-    Returns (score, None) if Ollama is unavailable.
+    Returns None if Ollama is unavailable.
     """
     if not abstract or not chunks:
         return 0.0
@@ -487,6 +487,66 @@ def score_against_memory(abstract, chunks):
         return None  # Ollama offline
     scores = [cosine_similarity(vec, chunk_vec) for _, chunk_vec in chunks]
     return max(scores) if scores else 0.0
+
+
+def load_belief_chunk_vecs(conn):
+    """Load embedding vectors for chunks linked to active, non-deprecated beliefs."""
+    rows = conn.execute("""
+        SELECT mc.embedding_vector
+        FROM memory_chunks mc
+        JOIN belief_chunk_links bcl ON bcl.chunk_id = mc.id
+        JOIN beliefs b ON b.id = bcl.belief_id
+        WHERE b.is_active = 1
+          AND b.status IN ('verified', 'supported', 'proposed')
+          AND mc.embedding_vector IS NOT NULL
+    """).fetchall()
+    return [unpack_vector(r[0]) for r in rows if r[0]]
+
+
+def _centroid(vecs):
+    """Return the mean vector of a list of same-length float lists, or None."""
+    if not vecs:
+        return None
+    n = len(vecs[0])
+    c = [0.0] * n
+    for v in vecs:
+        for i in range(n):
+            c[i] += v[i]
+    total = len(vecs)
+    return [x / total for x in c]
+
+
+def score_and_embed(text, all_chunks, belief_centroid):
+    """
+    Embed text once and return (relevance_score, challenge_score).
+
+    relevance_score  — max cosine against all memory chunks (convergence signal).
+    challenge_score  — 1.0 - cosine against belief centroid (divergence signal).
+                       High = paper diverges from consensus belief space = likely challenges.
+                       None if belief_centroid is unavailable.
+
+    Returns (None, None) if Ollama is offline.
+    """
+    if not text:
+        return 0.0, None
+    vec = embed_text(text)
+    if vec is None:
+        return None, None  # Ollama offline
+
+    # Relevance: max cosine against all memory chunks
+    if all_chunks:
+        relevance = max(cosine_similarity(vec, chunk_vec) for _, chunk_vec in all_chunks)
+    else:
+        relevance = 0.0
+
+    # Challenge: divergence from the consensus belief-space centroid
+    if belief_centroid:
+        alignment  = cosine_similarity(vec, belief_centroid)
+        challenge  = max(0.0, min(1.0, 1.0 - alignment))
+    else:
+        challenge = None
+
+    return relevance, challenge
 
 
 # ── Deduplication ─────────────────────────────────────────────────────────────
@@ -1051,7 +1111,7 @@ def fetch_trusted_youtube_channels(conn, log, max_per_channel: int = YOUTUBE_PER
 
 # ── Writer ────────────────────────────────────────────────────────────────────
 
-def write_result(conn, candidate, score, query, ring, triggered_by, dry_run=False):
+def write_result(conn, candidate, score, challenge_score, query, ring, triggered_by, dry_run=False):
     """Insert one result into scout_results. Returns True if written."""
     if dry_run:
         return True
@@ -1062,8 +1122,8 @@ def write_result(conn, candidate, score, query, ring, triggered_by, dry_run=Fals
                 title, authors, abstract, doi, source_url,
                 source_name, source_type, publication_date, external_id,
                 date_fetched, search_query, search_ring, triggered_by,
-                relevance_score, status, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,date('now'),?,?,?,?,
+                relevance_score, challenge_score, status, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,date('now'),?,?,?,?,?,
                       'pending', datetime('now'), datetime('now'))
         """, (
             candidate["title"],
@@ -1079,6 +1139,7 @@ def write_result(conn, candidate, score, query, ring, triggered_by, dry_run=Fals
             ring,
             triggered_by[:200] if triggered_by else None,
             round(score, 4) if score is not None else None,
+            round(challenge_score, 4) if challenge_score is not None else None,
         ))
         conn.commit()
         return True
@@ -1128,6 +1189,14 @@ def run(args):
         log.close()
         return
 
+    # Schema migration: challenge_score column (added 2026-05-05)
+    try:
+        conn.execute("ALTER TABLE scout_results ADD COLUMN challenge_score REAL")
+        conn.commit()
+        log.write("[migration] Added challenge_score column to scout_results")
+    except Exception:
+        pass  # Column already exists
+
     # Load memory chunks for scoring
     log.write("Loading memory chunks for relevance scoring...")
     chunks = load_memory_chunks(conn)
@@ -1135,6 +1204,16 @@ def run(args):
     ollama_online = len(chunks) > 0 and embed_text("test") is not None
     if not ollama_online:
         log.write("  Ollama offline -- relevance scoring disabled. Using keyword fallback.")
+
+    # Load belief vectors and compute centroid for challenge scoring
+    belief_centroid = None
+    if ollama_online:
+        belief_vecs = load_belief_chunk_vecs(conn)
+        belief_centroid = _centroid(belief_vecs)
+        if belief_centroid:
+            log.write(f"  Belief centroid computed from {len(belief_vecs)} belief chunk(s)")
+        else:
+            log.write("  No belief chunks available — challenge_score will be null")
     log.write("")
 
     # Generate seeds
@@ -1172,13 +1251,13 @@ def run(args):
             continue
         text = f"{item['title']} {item['abstract']}"
         if ollama_online:
-            score = score_against_memory(text, chunks)
+            score, challenge = score_and_embed(text, chunks, belief_centroid)
         else:
-            score = 0.0
+            score, challenge = 0.0, None
         if score is None:
             score = 0.0
         if score >= RELEVANCE_THRESHOLD:
-            all_candidates.append((score, item, "quanta_rss", 1, "quanta_feed"))
+            all_candidates.append((score, challenge, item, "quanta_rss", 1, "quanta_feed"))
     log.write("")
 
     # Trusted YouTube channels — curated sources from trusted_sources table
@@ -1187,14 +1266,14 @@ def run(args):
     for item in yt_items:
         text = f"{item['title']} {item['abstract']}"
         if ollama_online:
-            score = score_against_memory(text, chunks)
+            score, challenge = score_and_embed(text, chunks, belief_centroid)
         else:
-            score = 0.0
+            score, challenge = 0.0, None
         if score is None:
             score = 0.0
         triggered_by = f"trusted_source: {item['source_name']}"
         if score >= RELEVANCE_THRESHOLD:
-            all_candidates.append((score, item, item["source_name"], 1, triggered_by))
+            all_candidates.append((score, challenge, item, item["source_name"], 1, triggered_by))
     log.write("")
 
     # Query-driven sources
@@ -1241,13 +1320,13 @@ def run(args):
                     continue
                 text = f"{item['title']} {item['abstract']}"
                 if ollama_online:
-                    score = score_against_memory(text, chunks)
+                    score, challenge = score_and_embed(text, chunks, belief_centroid)
                 else:
-                    score = 0.0
+                    score, challenge = 0.0, None
                 if score is None:
                     score = 0.0
                 if score >= src_threshold:
-                    all_candidates.append((score, item, seed_query, ring, triggered_by))
+                    all_candidates.append((score, challenge, item, seed_query, ring, triggered_by))
                     new_count += 1
 
             log.write(f"    {len(items)} fetched, {new_count} above threshold")
@@ -1329,13 +1408,13 @@ def run(args):
     # Deduplicate candidates by DOI / URL across all sources (highest score wins)
     seen_keys = set()
     deduped = []
-    for score, item, query, ring, triggered_by in sorted(all_candidates, key=lambda x: x[0], reverse=True):
+    for score, challenge, item, query, ring, triggered_by in sorted(all_candidates, key=lambda x: x[0], reverse=True):
         key = item.get("doi") or item.get("source_url")
         if key and key in seen_keys:
             continue
         if key:
             seen_keys.add(key)
-        deduped.append((score, item, query, ring, triggered_by))
+        deduped.append((score, challenge, item, query, ring, triggered_by))
 
     # Cap at max_results, ranked by score
     to_write = deduped[:max_results]
@@ -1348,13 +1427,14 @@ def run(args):
     written = 0
     if to_write:
         log.write("Writing to scout_results...")
-        for score, item, query, ring, triggered_by in to_write:
-            ok = write_result(conn, item, score, query, ring, triggered_by,
+        for score, challenge, item, query, ring, triggered_by in to_write:
+            ok = write_result(conn, item, score, challenge, query, ring, triggered_by,
                               dry_run=args.dry_run)
             if ok:
                 written += 1
                 marker = "[DRY RUN] " if args.dry_run else ""
-                log.write(f"  {marker}[{item['source_name']}] score={score:.3f} "
+                challenge_str = f", challenge={challenge:.3f}" if challenge is not None else ""
+                log.write(f"  {marker}[{item['source_name']}] score={score:.3f}{challenge_str} "
                           f"| {item['title'][:70]}")
 
     log.write("")

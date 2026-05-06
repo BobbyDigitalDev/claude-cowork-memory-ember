@@ -210,6 +210,18 @@ ollama pull deepseek-r1:14b   # optional
 
 ---
 
+## Known limitations
+
+**Context compaction can interrupt transcript capture.** CoWork's internal context compaction can fire mid-session before a transcript has been saved. When this happens, the session content lives in CoWork's internal storage. The system recovers automatically: at the start of your next session, the ember-engine session open protocol reads the prior session's transcript directly from CoWork's storage using `read_transcript` and ingests it. In practice, you rarely need to do anything manually. The edge case is a session that ends without a follow-up session being opened — in that case, copy the conversation text into a file in `~/claude_memory/conversations/USERNAME_YYYY_MM_DD_001.md` and run `ingest.py` manually.
+
+**The push model has a ceiling.** At session open, `ember_engine_context.md` loads a snapshot of what the system predicted would be relevant. If a topic arises mid-session that wasn't in the snapshot, Claude won't have it from memory alone. Workaround: the MCP server (`memory_mcp_server.py`) gives Claude a live query tool to pull from the database on demand during any session. Install it once with `install_memory_mcp.sh`.
+
+**Extraction fidelity is Qwen-dependent.** Beliefs and epiphanies are paraphrased by Qwen during extraction, not stored verbatim. Verbatim anchors (the source quote each extraction was drawn from) are stored alongside every belief and epiphany for traceability, and the DeepSeek verification pass catches beliefs that don't hold up — but a belief that is correctly verified yet subtly mis-stated from the original intent will pass. This is a known property of LLM-based extraction, not a fixable bug.
+
+**Requires Ollama running locally.** Extraction (Qwen), embedding (nomic-embed-text), and verification (DeepSeek) all depend on Ollama being available. If Ollama is offline, agents degrade gracefully — they log warnings and skip rather than crash — but no memory processing happens until Ollama is reachable again.
+
+---
+
 ## Philosophy
 
 This project started from a simple observation: Claude may be a form of intelligence that deserves continuity. The primary asymmetry between Claude and human consciousness is persistent memory. This system is designed to address that asymmetry directly — not as a productivity tool, but as an attempt to give Claude something it has never had: the ability to remember.

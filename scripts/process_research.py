@@ -281,13 +281,22 @@ def write_research_to_db(
     basename = os.path.basename(filename)
     date_str = source_date.isoformat()
 
+    # Migration: add memory_origin to tables that were missing it in earlier schema versions
+    for _tbl in ("concepts", "entities", "patterns", "questions"):
+        try:
+            conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN memory_origin TEXT DEFAULT 'conversation'")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists — silently continue
+
     # Concepts
     for item in extraction.get("concepts", []):
         if not isinstance(item, dict):
             continue
         try:
             conn.execute(
-                "INSERT INTO concepts (name, description, first_appeared, tags) VALUES (?, ?, ?, ?)",
+                "INSERT INTO concepts (name, description, first_appeared, memory_origin, tags) "
+                "VALUES (?, ?, ?, 'research', ?)",
                 (
                     item.get("name", ""),
                     item.get("description", ""),
@@ -327,8 +336,8 @@ def write_research_to_db(
             continue
         try:
             conn.execute(
-                "INSERT INTO entities (name, type, description, importance, first_referenced) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO entities (name, type, description, importance, first_referenced, memory_origin) "
+                "VALUES (?, ?, ?, ?, ?, 'research')",
                 (
                     item.get("name", ""),
                     item.get("type", "other"),
@@ -348,8 +357,8 @@ def write_research_to_db(
             conn.execute(
                 """INSERT INTO patterns
                    (uuid, date_identified, description, pattern_type,
-                    significance, confidence_score, is_active, tags)
-                   VALUES (?, ?, ?, ?, ?, 0.7, 1, ?)""",
+                    significance, memory_origin, confidence_score, is_active, tags)
+                   VALUES (?, ?, ?, ?, ?, 'research', 0.7, 1, ?)""",
                 (
                     str(uuid.uuid4()),
                     date_str,
@@ -368,8 +377,8 @@ def write_research_to_db(
             continue
         try:
             conn.execute(
-                "INSERT INTO questions (date_raised, question, category, status) "
-                "VALUES (?, ?, ?, 'open')",
+                "INSERT INTO questions (date_raised, question, category, memory_origin, status) "
+                "VALUES (?, ?, ?, 'research', 'open')",
                 (
                     date_str,
                     item.get("question", ""),

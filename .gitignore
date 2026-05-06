@@ -59,9 +59,6 @@ ember_engine_context.md
 curator_report.md
 current_intent.txt
 
-# docs/ folder — moved to personal/docs/ (gitignored via personal/)
-# Safety net in case the folder is recreated
-docs/
 
 # pytest runtime artifacts
 pytest-cache-files-*

@@ -231,6 +231,79 @@ def _load_scout_context(conn, topic, position):
     return "\n".join(lines)
 
 
+# ── Fidelity assessment ─────────────────────────────────────────────────────────
+
+def assess_fidelity(belief: dict):
+    """Ask DeepSeek R1 whether the stored belief faithfully represents its verbatim anchor.
+
+    Fidelity measures extraction accuracy: did Qwen paraphrase the source correctly,
+    or did the meaning shift during extraction?
+
+    Returns a float (0.0–1.0), or None if assessment is skipped (no anchor, or R1 fails).
+
+    Score interpretation:
+      >= 0.80  high fidelity — same meaning, cleanly paraphrased
+      0.60-0.79  minor drift — qualifications may be softened but core claim intact
+      < 0.60   material distortion — extraction shifted the meaning; belief may be wrong
+    """
+    anchor   = (belief.get("verbatim_anchor") or "").strip()
+    position = (belief.get("position")        or "").strip()
+    topic    = (belief.get("topic")           or "").strip()
+
+    if not anchor or not position:
+        return None   # Nothing to compare — skip silently
+
+    prompt = f"""You are assessing whether an extracted belief faithfully represents its source quote.
+
+Source quote (verbatim from conversation):
+\"{anchor}\"
+
+Extracted belief:
+  Topic:    {topic}
+  Position: {position}
+
+Rate how faithfully the extracted belief captures the meaning of the source quote (0.0–1.0):
+  1.00 = perfect fidelity — same meaning, just paraphrased
+  0.80 = minor nuance loss but core claim preserved
+  0.60 = some drift — qualifications dropped or emphasis shifted
+  0.40 = moderate distortion — the extracted claim differs meaningfully from source
+  0.20 = significant distortion — source provides weak or no support for this claim
+  0.00 = complete misrepresentation — belief contradicts or fabricates content
+
+Return a JSON object with exactly two fields:
+{{
+  "fidelity_score": <float 0.0-1.0>,
+  "reasoning": "<one sentence explaining the score>"
+}}
+
+Return only the JSON object."""
+
+    result = ask_r1_for_json(prompt)
+    if not result or not isinstance(result, dict):
+        return None
+
+    raw = result.get("fidelity_score")
+    reasoning = result.get("reasoning", "")
+
+    if raw is None:
+        return None
+
+    try:
+        score = float(raw)
+        score = max(0.0, min(1.0, score))
+    except (TypeError, ValueError):
+        return None
+
+    if score < 0.60:
+        print(
+            f"    [fidelity] WARNING: score {score:.2f} for belief {belief.get('id', '?')} "
+            f"— {reasoning[:120]}",
+            file=sys.stderr
+        )
+
+    return round(score, 4)
+
+
 # ── Per-belief verification ─────────────────────────────────────────────────────
 
 def verify_belief(belief, conv_text, conn=None):
@@ -505,7 +578,7 @@ def _negate_and_reembed(conn, belief_id, new_status, dry_run):
     print(f"    [reembed] belief {belief_id} ({new_status}): re-embedded {reembedded}/{len(chunk_rows)} chunk(s)")
 
 
-def update_belief_status(conn, belief_id, verdict, confidence_score, reasoning, challenge, dry_run, conv_id=None):
+def update_belief_status(conn, belief_id, verdict, confidence_score, reasoning, challenge, dry_run, conv_id=None, belief=None):
     """Apply verification result to the beliefs table and record state transition."""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -587,6 +660,19 @@ def update_belief_status(conn, belief_id, verdict, confidence_score, reasoning, 
     # Shift the vector for deprecated/disputed beliefs away from positive-claim
     # space so they stop dominating semantic retrieval on that topic.
     _negate_and_reembed(conn, belief_id, new_status, dry_run=False)
+
+    # ── Fidelity assessment ───────────────────────────────────────────────────
+    # Ask R1 whether the stored belief faithfully represents its verbatim anchor.
+    # Only runs if the belief dict was passed and contains a verbatim_anchor.
+    # Low scores (< 0.6) are also emitted to stderr so nightly logs catch them.
+    if belief and not dry_run:
+        fidelity = assess_fidelity(belief)
+        if fidelity is not None:
+            c.execute(
+                "UPDATE beliefs SET fidelity_score = ? WHERE id = ?",
+                (fidelity, belief_id)
+            )
+            conn.commit()
 
     # ── Write sources record ──────────────────────────────────────────────────
     # Record the conversation that grounded this verdict so sources is populated
@@ -833,6 +919,14 @@ def run_verification_pass(limit=20, dry_run=False, status_filter="proposed",
     c    = conn.cursor()
     now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # ── Migration: add fidelity_score column if absent ────────────────────────
+    try:
+        conn.execute("ALTER TABLE beliefs ADD COLUMN fidelity_score REAL")
+        conn.commit()
+        print("[migration] Added fidelity_score column to beliefs")
+    except Exception:
+        pass   # Column already exists — silently continue
+
     print(f"\n{'='*60}")
     print(f"Belief Verification Pass")
     print(f"Started:  {now}")
@@ -912,7 +1006,7 @@ def run_verification_pass(limit=20, dry_run=False, status_filter="proposed",
         print()
 
         results[verdict] = results.get(verdict, 0) + 1
-        update_belief_status(conn, bid, verdict, new_score, reasoning, challenge, dry_run, conv_id=conv_id)
+        update_belief_status(conn, bid, verdict, new_score, reasoning, challenge, dry_run, conv_id=conv_id, belief=belief)
 
     # ── 3. Cross-belief contradiction check ───────────────────────────────────
     if check_contradictions:

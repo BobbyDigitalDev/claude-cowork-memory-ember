@@ -810,6 +810,9 @@ def _main():
                         help="Skip semantic strategy (useful if nomic-embed-text not running)")
     parser.add_argument("--format", choices=["markdown", "json", "plain"], default="plain",
                         help="Output format (default: plain)")
+    parser.add_argument("--explain", action="store_true",
+                        help="Show full scoring breakdown for each result: raw scores, "
+                             "epistemic multiplier, recency bonus, strategy contributions")
     parser.add_argument("--db", default=None, metavar="PATH",
                         help="Override database path")
     args = parser.parse_args()
@@ -862,6 +865,52 @@ def _main():
             print(f"     {status}{content_preview}")
             if r.get("tags"):
                 print(f"     tags: {r['tags'][:80]}")
+
+            if args.explain:
+                # Parse scoring components out of the meta string
+                meta_raw = r.get("meta", "")
+                multiplier = None
+                recency    = None
+                for part in meta_raw.split("|"):
+                    part = part.strip()
+                    if part.startswith("epistemic_multiplier="):
+                        try:
+                            multiplier = float(part.split("=")[1])
+                        except ValueError:
+                            pass
+                    elif part.startswith("recency_bonus="):
+                        try:
+                            recency = float(part.split("=")[1])
+                        except ValueError:
+                            pass
+
+                print(f"     ── explain ──────────────────────────────────────")
+                print(f"     strategy(ies):  {strats}")
+                print(f"     final score:    {score:.4f}")
+
+                # Back-calculate raw cosine if we have multiplier and recency
+                if multiplier is not None and recency is not None:
+                    raw_cosine = (score - recency) / multiplier if multiplier > 0 else score
+                    print(f"     raw cosine:     {raw_cosine:.4f}")
+                    print(f"     epistemic mult: {multiplier:.2f}  (belief status: {r.get('status', '?')})")
+                    print(f"     recency bonus:  +{recency:.4f}")
+                elif multiplier is not None:
+                    raw_cosine = score / multiplier if multiplier > 0 else score
+                    print(f"     raw cosine:     {raw_cosine:.4f}")
+                    print(f"     epistemic mult: {multiplier:.2f}  (belief status: {r.get('status', '?')})")
+                elif recency is not None:
+                    print(f"     recency bonus:  +{recency:.4f}")
+
+                mem_origin = r.get("memory_origin", "")
+                if not mem_origin:
+                    # Not directly in result dict — note it's not stored at retrieval time
+                    mem_origin = "(not tracked at retrieval time)"
+                print(f"     memory origin:  {mem_origin}")
+                print(f"     source:         {stype} id={sid}")
+                if r.get("chunk_id"):
+                    print(f"     chunk id:       {r['chunk_id']}")
+                print(f"     ─────────────────────────────────────────────────")
+
             print()
 
         print(f"{'─'*60}")

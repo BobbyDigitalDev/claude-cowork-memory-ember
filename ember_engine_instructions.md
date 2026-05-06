@@ -1,6 +1,6 @@
 # ember-engine — Session Instructions
-**Version:** 1.1
-**Last updated:** 2026-04-30 — transcript capture redesigned: read_transcript (Step 0) is now the primary path; per-exchange append demoted to backup.
+**Version:** 1.2
+**Last updated:** 2026-05-05 — fixed Step 0 processing_jobs query: session_name column does not exist; correct column is source_file.
 **Installation:** ~/claude_memory/
 
 ---
@@ -37,7 +37,7 @@ Every word the user writes and every word Claude writes MUST be copied into the 
 Step 0 (auto-ingest previous session — runs silently before anything else): The primary transcript capture path uses Cowork's own session storage, not Claude's mid-session writing. This eliminates the summarization failure mode entirely.
 
 - Call `list_sessions`. Find the most recently active idle session that is NOT the current session.
-- Check whether it has already been ingested: look for a file in ~/claude_memory/conversations/ whose date matches the session's date, OR query processing_jobs in memory.db for that session name.
+- Check whether it has already been ingested: look for a file in ~/claude_memory/conversations/ whose date matches the session's date, OR query processing_jobs in memory.db using the source_file column (e.g. `SELECT COUNT(*) FROM processing_jobs WHERE source_file LIKE '%YYYY_MM_DD%' AND status='completed'`). Column list for this table is in the LIVE SCHEMA section of this context file. If unsure, verify with `PRAGMA table_info(processing_jobs)` before writing any query.
 - If NOT yet ingested:
   - Call `read_transcript` with `format="full"` and `limit=200` on that session's ID.
   - Write the raw output to `~/claude_memory/conversations/USERNAME_YYYY_MM_DD_NNN_raw.txt` using the session's date in the filename.
@@ -121,6 +121,12 @@ Run this after loading all three files and creating the transcript, before respo
 **Step 0 — Auto-ingest previous session (invisible to user).**
 See TRANSCRIPT WORKFLOW Step 0 above. Run it now. One line of output to user if something was ingested; silent if not. Then continue.
 
+Also run the smoketest silently:
+```
+python3 ~/claude_memory/scripts/session_open_smoketest.py --quiet
+```
+If it exits non-zero, surface the failures to the user before proceeding. If it passes, say nothing.
+
 **Step A — Read the room.**
 Check recent_memory.md Goals section for pending goals with status "pending" and priority "immediate" or "near-term." Count them.
 
@@ -156,7 +162,8 @@ For each topic in the result, give one line of coverage signal. Be brief.
 If all topics are DENSE or PARTIAL and there is nothing actionable to flag, skip this step entirely.
 
 **Step F — Scout digest check (invisible to user).**
-After the density check, query scout_results for any pending items with relevance_score >= 0.75:
+After the density check, query scout_results for any pending items with relevance_score >= 0.75.
+Column list for scout_results is in the LIVE SCHEMA section of this context file. If the context file is stale, verify with `PRAGMA table_info(scout_results)` before querying.
 ```python
 import sqlite3
 from pathlib import Path
@@ -168,6 +175,7 @@ rows = conn.execute("""
 """).fetchall()
 conn.close()
 ```
+If the table does not exist yet (Research Scout Agent not yet built), skip silently.
 If 1 or more results are found, surface them in one line at the end of your session-open response:
 > "Also: N items in the research queue above threshold. Want to run through them now or after?"
 

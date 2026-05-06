@@ -26,6 +26,7 @@ import sqlite3
 import uuid as uuid_lib
 import os
 from datetime import datetime
+from pathlib import Path
 
 DB_PATH = os.path.expanduser("~/claude_memory/memory.db")
 
@@ -72,6 +73,7 @@ def setup_database():
             confidence               TEXT,
             confidence_score         REAL DEFAULT 0.5,
             confidence_calibrated    INTEGER DEFAULT 0,
+            fidelity_score           REAL,
             evidence_snippets        TEXT,
             verbatim_anchor          TEXT,
             evidence_chunk_ids       TEXT,
@@ -192,6 +194,7 @@ def setup_database():
             related_beliefs    TEXT,
             related_epiphanies TEXT,
             evolution_notes    TEXT,
+            memory_origin      TEXT DEFAULT 'conversation',
             tags               TEXT,
             created_at         TEXT,
             updated_at         TEXT
@@ -227,6 +230,7 @@ def setup_database():
             first_referenced TEXT,
             importance       TEXT,
             notes            TEXT,
+            memory_origin    TEXT DEFAULT 'conversation',
             tags             TEXT,
             created_at       TEXT,
             updated_at       TEXT
@@ -331,6 +335,7 @@ def setup_database():
             status                 TEXT,
             related_beliefs        TEXT,
             related_concepts       TEXT,
+            memory_origin          TEXT DEFAULT 'conversation',
             tags                   TEXT,
             created_at             TEXT,
             updated_at             TEXT
@@ -374,6 +379,7 @@ def setup_database():
             valid_to              TEXT,
             extraction_version    INTEGER DEFAULT 1,
             last_processed_at     TEXT,
+            memory_origin         TEXT DEFAULT 'conversation',
             tags                  TEXT,
             created_at            TEXT
         )

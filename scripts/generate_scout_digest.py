@@ -56,6 +56,25 @@ def _fmt_score(score) -> str:
     return f"{float(score):.2f}"
 
 
+def _fmt_challenge(score) -> str:
+    """Return a short label for a challenge_score value.
+
+    challenge_score (0.0–1.0) measures cosine divergence from the belief-space
+    centroid: high = this paper pushes against existing beliefs; low = aligns.
+      ≥ 0.70 → "⚡ challenges"  — paper diverges strongly from current beliefs
+      ≥ 0.45 → "~ mixed"       — partial overlap; some tension present
+      < 0.45 → "✓ aligns"      — paper reinforces existing belief space
+    """
+    if score is None:
+        return ""
+    s = float(score)
+    if s >= 0.70:
+        return "⚡ challenges"
+    if s >= 0.45:
+        return "~ mixed"
+    return "✓ aligns"
+
+
 def _fmt_date(date_str) -> str:
     if not date_str:
         return ""
@@ -102,12 +121,16 @@ def _format_item(row: sqlite3.Row, idx: int) -> str:
     rid       = row["id"]
     notes     = row["curator_notes"] or ""
 
+    challenge_sig  = _fmt_challenge(row["challenge_score"])
+    challenge_part = f" | {challenge_sig}" if challenge_sig else ""
+
     lines = []
     lines.append(
         f"### [{idx}] {title}"
     )
     lines.append(
-        f"**{source}** | {pub_date} | score: {_fmt_score(score)} {_score_bar(score)} | {_ring_label(ring)}"
+        f"**{source}** | {pub_date} | score: {_fmt_score(score)} {_score_bar(score)}"
+        f" | {_ring_label(ring)}{challenge_part}"
     )
     if triggered:
         lines.append(f"*Triggered by:* {triggered}")
@@ -217,9 +240,18 @@ def _build_digest(rows: list, generated_at: datetime, days: int, status_filter: 
 
 # ── Database query ─────────────────────────────────────────────────────────────
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if column exists on table in the live DB."""
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in cols
+
+
 def _fetch_results(conn: sqlite3.Connection, days: int, status_filter: str) -> list:
     """Fetch scout_results rows for the digest."""
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # challenge_score was added in a migration — probe before selecting
+    challenge_col = "challenge_score" if _has_column(conn, "scout_results", "challenge_score") else "NULL AS challenge_score"
 
     if status_filter == "all":
         where_status = "status NOT IN ('dismissed', 'ingested')"
@@ -234,7 +266,7 @@ def _fetch_results(conn: sqlite3.Connection, days: int, status_filter: str) -> l
 
     rows = conn.execute(f"""
         SELECT id, title, authors, abstract, source_url, source_name, source_type,
-               publication_date, search_ring, triggered_by, relevance_score,
+               publication_date, search_ring, triggered_by, relevance_score, {challenge_col},
                status, curator_notes, promoted_to, reviewed_at, date_fetched
         FROM scout_results
         WHERE {where_status}
