@@ -304,22 +304,7 @@ def run(args: argparse.Namespace) -> int:
     log.write(f"dry_run={args.dry_run}  no_jitter={args.no_jitter}")
     log.sep()
 
-    # ── Ollama check ──
-    if args.dry_run:
-        log.write("DRY RUN — skipping Ollama availability check.")
-    else:
-        log.write("Checking Ollama availability...")
-        if not ollama_is_running():
-            log.write("Ollama is not running. Nothing to ingest.")
-            log.write("Start Ollama and re-run, or wait for the next scheduled window.")
-            log.write("Manual run: python3 ~/claude_memory/scripts/ingest_agent.py --no-jitter")
-            log.sep()
-            log.close()
-            return 1
-        log.write("Ollama is running.")
-    log.write("")
-
-    # ── Load queue ──
+    # ── Load queue ── (check before Ollama so an empty queue exits 3, not 1)
     db_path = Path(args.db) if args.db else DB_PATH
     if not db_path.exists():
         log.write(f"ERROR: database not found at {db_path}")
@@ -335,6 +320,22 @@ def run(args: argparse.Namespace) -> int:
         log.close()
         conn.close()
         return 3
+
+    # ── Ollama check ── (only gate if there are items to process)
+    if args.dry_run:
+        log.write("DRY RUN — skipping Ollama availability check.")
+    else:
+        log.write("Checking Ollama availability...")
+        if not ollama_is_running():
+            log.write("Ollama is not running. Nothing to ingest.")
+            log.write("Start Ollama and re-run, or wait for the next scheduled window.")
+            log.write("Manual run: python3 ~/claude_memory/scripts/ingest_agent.py --no-jitter")
+            log.sep()
+            log.close()
+            conn.close()
+            return 1
+        log.write("Ollama is running.")
+    log.write("")
 
     log.write(f"Found {len(queued)} item(s) queued for ingest:")
     for row in queued:

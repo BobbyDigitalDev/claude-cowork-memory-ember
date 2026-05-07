@@ -219,7 +219,7 @@ def build_snapshot_content(conn):
     lines = []
 
     lines.append("# Claude Memory Snapshot")
-    lines.append(f"Generated: {timestamp} | Sessions: {session_count} | Schema: v2.2")
+    lines.append(f"Generated: {timestamp} | Sessions: {session_count} | Schema: v2.8.0")
     lines.append("")
 
     # Last conversation

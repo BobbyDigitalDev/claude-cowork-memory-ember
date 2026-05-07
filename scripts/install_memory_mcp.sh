@@ -34,11 +34,10 @@ if python3 -c "import mcp.server.fastmcp" 2>/dev/null; then
     echo "  ✓ mcp (FastMCP) already installed"
 else
     echo "  Installing mcp>=1.0..."
-    pip install "mcp>=1.0" --break-system-packages --quiet 2>/dev/null \
-        || pip3 install "mcp>=1.0" --quiet 2>/dev/null \
+    python3 -m pip install "mcp>=1.0" --break-system-packages --quiet 2>/dev/null \
         || {
             echo "  ✗ pip install failed."
-            echo "    Try manually: pip install 'mcp>=1.0' --break-system-packages"
+            echo "    Try manually: python3 -m pip install 'mcp>=1.0' --break-system-packages"
             exit 1
         }
     # Verify install succeeded

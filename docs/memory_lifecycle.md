@@ -152,9 +152,10 @@ Tracks every background extraction, embedding, and verification run.
 | Status | Meaning |
 |---|---|
 | `pending` | Job queued, not yet started |
-| `started` | Agent picked up the job |
-| `completed` | Successfully finished |
-| `failed` | Error occurred; check `error_log` |
+| `started` | Agent picked up the job; row exists, writes in progress |
+| `completed` | All expected writes succeeded |
+| `completed_with_warnings` | Job finished but one or more row/provenance writes failed; `error_log` has details |
+| `failed` | Unrecoverable error; check `error_log` |
 
 ### Script ownership
 
@@ -162,11 +163,13 @@ Tracks every background extraction, embedding, and verification run.
 |---|---|
 | `pending` creation | `ingest.py`, `auto_ingest.py`, `research_scout.py` |
 | `pending → started` | `ingest_agent.py`, `process_conversation.py` |
-| `any → completed` | Same script that started it |
-| `any → failed` | Same script (on exception) |
+| `started → completed` | Same script (all writes succeeded) |
+| `started → completed_with_warnings` | Same script (partial write failures; `error_log` populated) |
+| `started → failed` | Same script (on unrecoverable exception) |
+| `any → failed` | Same script (file-level error before writes begin) |
 
 Pending jobs are surfaced in `doctor.py` and `memory_health.py`.
-Failed jobs appear in `memory_health.py` with error excerpts.
+Failed and `completed_with_warnings` jobs appear in `memory_health.py` with error excerpts.
 
 ---
 
@@ -214,6 +217,32 @@ Goals are tracked separately from the main memory graph and are not versioned.
 
 Goals are surfaced in session context by both semantic (if query-relevant) and
 temporal (if recently created) retrieval strategies.
+
+---
+
+## Session metadata types: moods, gratitude, boundaries
+
+`moods`, `gratitude`, and `boundaries` are written by `process_conversation.py` but
+are **intentionally excluded from the provenance system**. They are session-scoped
+metadata, not extractable knowledge objects, for the following reasons:
+
+- **No lifecycle**: they have no `status` field, no verification path, and are never
+  promoted, deprecated, or archived. They record what happened in a session; they
+  do not make claims that need to be checked over time.
+- **No retrieval weight**: the retrieval pipeline (`retrieve.py`) does not score or
+  surface moods, gratitude entries, or boundaries via semantic or structural strategies.
+  They are consulted only by `memory_health.py` for session-quality reporting.
+- **No epistemic risk**: unlike beliefs or epiphanies, these types do not assert facts
+  about the world. Provenance tracking exists to support trust inspection and future
+  re-verification; those concerns do not apply to session tone or acknowledged moments.
+
+`memory_provenance` rows are therefore not written for these three types, and no
+`memory_origin` column is defined on their tables. This is a deliberate design
+decision, not an oversight.
+
+If a future use case requires tracking where a specific boundary decision came from
+(e.g., attributing it to a specific conversation for replay), the design should be
+revisited and a migration + provenance write added at that time.
 
 ---
 

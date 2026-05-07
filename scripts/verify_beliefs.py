@@ -180,7 +180,7 @@ def _load_scout_context(conn, topic, position):
     """
     try:
         rows = conn.execute("""
-            SELECT title, abstract, source_name, relevance_score, url
+            SELECT title, abstract, source_name, relevance_score, source_url
             FROM scout_results
             WHERE status = 'ingested' OR relevance_score >= 0.65
             ORDER BY relevance_score DESC

@@ -11,7 +11,11 @@ if [ ! -f "$PLIST_SRC" ]; then
     exit 1
 fi
 
-sed "s|__INSTALL_DIR__|$BASE|g" "$PLIST_SRC" > "$PLIST_DST"
+PYTHON3=$(which python3 2>/dev/null || echo "/usr/bin/python3")
+sed \
+    -e "s|__INSTALL_DIR__|$BASE|g" \
+    -e "s|__PYTHON3__|$PYTHON3|g" \
+    "$PLIST_SRC" > "$PLIST_DST"
 launchctl load "$PLIST_DST"
 
 echo "Contrary scout daemon installed."

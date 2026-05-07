@@ -72,10 +72,11 @@ import pytest
 @pytest.fixture()
 def db(tmp_path):
     db_path = str(tmp_path / "test_research.db")
-    orig = setup_db.DB_PATH
-    setup_db.DB_PATH = db_path
-    setup_db.setup_database()
-    setup_db.DB_PATH = orig
+    conn = sqlite3.connect(db_path)
+
+    setup_db.create_latest_schema(conn)
+
+    conn.close()
     orig_pr = pr.DB_PATH
     pr.DB_PATH = db_path
     yield db_path
@@ -226,6 +227,138 @@ class TestProcessingJobTracking:
         ).fetchone()
         assert row is not None
         assert row[0] == "completed"
+
+    def test_job_started_before_writes(self, db):
+        """Job row must exist with status='started' before writes begin.
+
+        Verified indirectly: process_research_file records 'started' then
+        transitions to 'completed' only after all writes succeed. We confirm
+        no job row remains in 'started' state after a clean run.
+        """
+        conn = sqlite3.connect(db)
+        extraction = {k: [] for k in ["concepts", "beliefs", "entities", "patterns", "questions", "epiphanies"]}
+        with patch("process_research.run_extractions", return_value=extraction):
+            pr.process_research_file(
+                "2026_04_25_started_test.txt",
+                content=SAMPLE_CONTENT,
+                conn=conn,
+                source_date=date(2026, 4, 25),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT status FROM processing_jobs WHERE source_file='2026_04_25_started_test.txt'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] != "started", "Job should not be left in 'started' state after completion"
+        assert row[0] in ("completed", "completed_with_warnings")
+
+    def test_partial_failure_marks_completed_with_warnings(self, db):
+        """If write_research_to_db returns failures, job status is completed_with_warnings."""
+        conn = sqlite3.connect(db)
+        extraction = {k: [] for k in ["concepts", "beliefs", "entities", "patterns", "questions", "epiphanies"]}
+        with patch("process_research.run_extractions", return_value=extraction), \
+             patch("process_research.write_research_to_db", return_value=["concept write failed: test error"]):
+            pr.process_research_file(
+                "2026_04_25_warn_test.txt",
+                content=SAMPLE_CONTENT,
+                conn=conn,
+                source_date=date(2026, 4, 25),
+            )
+        conn.commit()
+        row = conn.execute(
+            "SELECT status, error_log FROM processing_jobs WHERE source_file='2026_04_25_warn_test.txt'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "completed_with_warnings"
+        assert "concept write failed" in (row[1] or "")
+
+
+# ── Provenance writes ─────────────────────────────────────────────────────────
+
+class TestResearchProvenance:
+    """write_research_to_db must produce memory_provenance rows for all 6 memory types."""
+
+    def _prov_count(self, conn, memory_type):
+        return conn.execute(
+            "SELECT COUNT(*) FROM memory_provenance WHERE memory_type=?",
+            (memory_type,)
+        ).fetchone()[0]
+
+    def test_concept_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "concept") >= 1
+        conn.close()
+
+    def test_belief_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "belief") >= 1
+        conn.close()
+
+    def test_entity_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "entity") >= 1
+        conn.close()
+
+    def test_pattern_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "pattern") >= 1
+        conn.close()
+
+    def test_question_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "question") >= 1
+        conn.close()
+
+    def test_epiphany_provenance_written(self, db):
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        assert self._prov_count(conn, "epiphany") >= 1
+        conn.close()
+
+    def test_extended_provenance_fields_stored(self, db):
+        """source_url and source_fetched_at must be written when provided."""
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(
+            conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25),
+            source_url="https://www.youtube.com/watch?v=4nqtyCSS7Fg",
+            source_fetched_at="2026-04-25T21:45:00",
+            processing_job_id=99,
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT source_url, source_fetched_at, processing_job_id "
+            "FROM memory_provenance WHERE memory_type='belief'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "https://www.youtube.com/watch?v=4nqtyCSS7Fg"
+        assert row[1] == "2026-04-25T21:45:00"
+        assert row[2] == 99
+        conn.close()
+
+    def test_all_six_types_produce_provenance(self, db):
+        """A single write_research_to_db call must cover all 6 extraction types."""
+        conn = sqlite3.connect(db)
+        pr.write_research_to_db(conn, MINIMAL_EXTRACTION, "test.txt", date(2026, 4, 25))
+        conn.commit()
+        types_found = {
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT memory_type FROM memory_provenance"
+            ).fetchall()
+        }
+        conn.close()
+        expected = {"concept", "belief", "entity", "pattern", "question", "epiphany"}
+        assert expected <= types_found, f"Missing provenance for: {expected - types_found}"
         conn.close()
 
     def test_skips_already_processed(self, db):

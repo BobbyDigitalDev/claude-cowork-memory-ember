@@ -58,7 +58,7 @@ mkdir -p "$LOGS_DIR"
 # Copy plist to LaunchAgents, patching python3 path and home directory
 echo "Copying plist to ~/Library/LaunchAgents/ (python3: $PYTHON3_PATH, home: $HOME)"
 sed \
-    -e "s|/usr/bin/python3|$PYTHON3_PATH|g" \
+    -e "s|__PYTHON3__|$PYTHON3_PATH|g" \
     -e "s|__INSTALL_DIR__|$BASE|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 

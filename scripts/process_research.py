@@ -54,6 +54,72 @@ OLLAMA_URL   = "http://localhost:11434/api/generate"
 NOW = datetime.now()
 
 
+# ── Research header parser ─────────────────────────────────────────────────────
+
+def parse_research_header(content: str) -> dict:
+    """
+    Extract provenance metadata from the YAML-style header block written by
+    fetch_youtube_transcript.py and similar ingestion tools.
+
+    Recognises lines of the form:
+        **URL:** https://...
+        **Fetched:** 2026-05-01 14:32
+        **Source:** ...
+
+    Returns a dict with keys: url, fetched_at (ISO string or None).
+    """
+    meta: dict = {"url": None, "fetched_at": None}
+    lines = content.split("\n")
+
+    # Only inspect the header region (before the first '---' separator)
+    for line in lines:
+        if line.strip() == "---":
+            break
+        for key, field in (("**URL:**", "url"), ("**Fetched:**", "fetched_at")):
+            if line.strip().startswith(key):
+                val = line.strip()[len(key):].strip()
+                if field == "fetched_at":
+                    # Normalise to ISO format if possible
+                    try:
+                        meta["fetched_at"] = datetime.strptime(
+                            val, "%Y-%m-%d %H:%M"
+                        ).isoformat()
+                    except ValueError:
+                        meta["fetched_at"] = val
+                else:
+                    meta[field] = val
+
+    return meta
+
+
+# ── Provenance writer ──────────────────────────────────────────────────────────
+
+def _write_provenance(
+    conn: sqlite3.Connection,
+    memory_type: str,
+    memory_id: int,
+    extraction_model: str,
+    source_url: str | None,
+    source_fetched_at: str | None,
+    processing_job_id: int | None,
+) -> None:
+    """Write a memory_provenance row for a research-derived memory object."""
+    _cur = conn.execute("""
+        INSERT INTO memory_provenance
+            (memory_type, memory_id, extraction_model,
+             source_url, source_fetched_at, processing_job_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        memory_type,
+        memory_id,
+        extraction_model,
+        source_url,
+        source_fetched_at,
+        processing_job_id,
+        NOW.isoformat(),
+    ))
+
+
 # ── Ollama helper ─────────────────���──────────────────────────────────���────────
 
 def ask_qwen(prompt: str, model: str = MODEL) -> str | None:
@@ -276,25 +342,44 @@ def write_research_to_db(
     extraction: dict,
     filename: str,
     source_date: date,
+    *,
+    source_url: str | None = None,
+    source_fetched_at: str | None = None,
+    processing_job_id: int | None = None,
 ) -> None:
-    """Write all extracted items to the DB with memory_origin='research'."""
+    """Write all extracted items to the DB with memory_origin='research'.
+
+    Keyword-only provenance args:
+        source_url          URL of the original source document
+        source_fetched_at   ISO timestamp when the source was retrieved
+        processing_job_id   ID of the processing_jobs row for this run
+
+    Returns a list of failure strings (empty list = all writes succeeded).
+    Callers should use this to decide whether to mark the job completed or
+    completed_with_warnings.
+    """
     basename = os.path.basename(filename)
     date_str = source_date.isoformat()
+    failures: list[str] = []
 
-    # Migration: add memory_origin to tables that were missing it in earlier schema versions
-    for _tbl in ("concepts", "entities", "patterns", "questions"):
+    def _prov(mem_type: str, mem_id: int) -> None:
+        """Write provenance for one extracted memory row."""
         try:
-            conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN memory_origin TEXT DEFAULT 'conversation'")
-            conn.commit()
-        except Exception:
-            pass  # Column already exists — silently continue
+            _write_provenance(
+                conn, mem_type, mem_id, MODEL,
+                source_url, source_fetched_at, processing_job_id,
+            )
+        except Exception as e:
+            msg = f"provenance write failed ({mem_type} {mem_id}): {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Concepts
     for item in extraction.get("concepts", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 "INSERT INTO concepts (name, description, first_appeared, memory_origin, tags) "
                 "VALUES (?, ?, ?, 'research', ?)",
                 (
@@ -304,15 +389,18 @@ def write_research_to_db(
                     _to_str(item.get("tags", [])),
                 )
             )
+            _prov("concept", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] concept write failed: {e}")
+            msg = f"concept write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Beliefs
     for item in extraction.get("beliefs", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 """INSERT INTO beliefs
                    (uuid, topic, position, confidence, evidence_snippets,
                     memory_origin, status, is_active, tags, created_at)
@@ -327,15 +415,18 @@ def write_research_to_db(
                     NOW.isoformat(),
                 )
             )
+            _prov("belief", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] belief write failed: {e}")
+            msg = f"belief write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Entities
     for item in extraction.get("entities", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 "INSERT INTO entities (name, type, description, importance, first_referenced, memory_origin) "
                 "VALUES (?, ?, ?, ?, ?, 'research')",
                 (
@@ -346,15 +437,18 @@ def write_research_to_db(
                     date_str,
                 )
             )
+            _prov("entity", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] entity write failed: {e}")
+            msg = f"entity write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Patterns
     for item in extraction.get("patterns", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 """INSERT INTO patterns
                    (uuid, date_identified, description, pattern_type,
                     significance, memory_origin, confidence_score, is_active, tags)
@@ -368,15 +462,18 @@ def write_research_to_db(
                     _to_str(item.get("tags", [])),
                 )
             )
+            _prov("pattern", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] pattern write failed: {e}")
+            msg = f"pattern write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Questions
     for item in extraction.get("questions", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 "INSERT INTO questions (date_raised, question, category, memory_origin, status) "
                 "VALUES (?, ?, ?, 'research', 'open')",
                 (
@@ -385,15 +482,18 @@ def write_research_to_db(
                     item.get("category", "research"),
                 )
             )
+            _prov("question", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] question write failed: {e}")
+            msg = f"question write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
 
     # Epiphanies
     for item in extraction.get("epiphanies", []):
         if not isinstance(item, dict):
             continue
         try:
-            conn.execute(
+            _cur = conn.execute(
                 """INSERT INTO epiphanies
                    (uuid, date, description, implications,
                     memory_origin, is_active, confidence_score, tags)
@@ -405,13 +505,62 @@ def write_research_to_db(
                     item.get("implications", ""),
                 )
             )
+            _prov("epiphany", _cur.lastrowid)
         except Exception as e:
-            print(f"  [warn] epiphany write failed: {e}")
+            msg = f"epiphany write failed: {e}"
+            print(f"  [warn] {msg}")
+            failures.append(msg)
+
+    return failures
 
 
-def record_job(conn: sqlite3.Connection, filename: str, status: str, error: str = "") -> None:
+def _start_job(conn: sqlite3.Connection, filename: str) -> int:
+    """Insert a processing_jobs row with status='started' and return its ID."""
+    cur = conn.execute(
+        """INSERT INTO processing_jobs
+           (uuid, job_type, target_type, source_file, model_used, status,
+            started_at, created_at)
+           VALUES (?, 'research_extraction', 'research_file', ?, ?, 'started', ?, ?)""",
+        (
+            str(uuid.uuid4()),
+            os.path.basename(filename),
+            MODEL,
+            NOW.isoformat(),
+            NOW.isoformat(),
+        )
+    )
+    job_id = cur.lastrowid
+    conn.commit()
+    return job_id
+
+
+def _finish_job(
+    conn: sqlite3.Connection,
+    job_id: int,
+    status: str,
+    error: str = "",
+) -> None:
+    """Update an existing processing_jobs row to its final status."""
     conn.execute(
-        """INSERT OR REPLACE INTO processing_jobs
+        """UPDATE processing_jobs
+           SET status = ?, completed_at = ?, error_log = ?
+           WHERE id = ?""",
+        (status, NOW.isoformat(), error or "", job_id)
+    )
+    conn.commit()
+
+
+def record_job(
+    conn: sqlite3.Connection, filename: str, status: str, error: str = ""
+) -> int:
+    """Write a one-shot processing_jobs row and return its ID.
+
+    Used by the main() exception handler for file-level failures that occur
+    before _start_job() has been called. For the normal pipeline, use
+    _start_job() + _finish_job() so job status accurately reflects write outcomes.
+    """
+    cur = conn.execute(
+        """INSERT INTO processing_jobs
            (uuid, job_type, target_type, source_file, model_used, status,
             started_at, completed_at, error_log)
            VALUES (?, 'research_extraction', 'research_file', ?, ?, ?, ?, ?, ?)""",
@@ -425,7 +574,9 @@ def record_job(conn: sqlite3.Connection, filename: str, status: str, error: str 
             error,
         )
     )
+    job_id = cur.lastrowid
     conn.commit()
+    return job_id
 
 
 # ── Core process function (testable) ────────────────────────���────────────────
@@ -448,6 +599,9 @@ def process_research_file(
         print(f"  [skip] already processed: {basename}")
         return False
 
+    # Parse provenance metadata from file header before stripping it
+    header_meta = parse_research_header(content)
+
     print(f"  Running extractions on {basename}...")
     extraction = run_extractions(content, basename)
 
@@ -455,9 +609,27 @@ def process_research_file(
         print(json.dumps(extraction, indent=2))
         return True
 
-    write_research_to_db(conn, extraction, basename, source_date)
+    # Record job as started so job_id is available for provenance rows.
+    # Status is updated to completed/completed_with_warnings after writes finish.
+    job_id = _start_job(conn, basename)
+
+    failures = write_research_to_db(
+        conn, extraction, basename, source_date,
+        source_url=header_meta.get("url"),
+        source_fetched_at=header_meta.get("fetched_at"),
+        processing_job_id=job_id,
+    )
+
+    if failures:
+        final_status = "completed_with_warnings"
+        error_log = "; ".join(failures)
+        print(f"  [warn] {len(failures)} write failure(s) — job marked completed_with_warnings")
+    else:
+        final_status = "completed"
+        error_log = ""
+
+    _finish_job(conn, job_id, final_status, error_log)
     conn.commit()
-    record_job(conn, basename, "completed")
     return True
 
 

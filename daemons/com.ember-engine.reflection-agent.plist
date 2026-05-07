@@ -8,7 +8,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>__PYTHON3__</string>
         <string>__INSTALL_DIR__/scripts/reflection_agent.py</string>
     </array>
 

@@ -1,25 +1,37 @@
 """
 setup_db.py
 -----------
-Creates and initializes the CoWork memory database.
+Creates and initializes the ember-engine memory database.
+
+Two entry points:
+    create_latest_schema(conn)
+        Creates all tables, indexes, triggers, and seed data for a fresh
+        install at the current schema version. Called once at install time.
+
+    main()
+        Decision gate. If no database exists, calls create_latest_schema()
+        and seeds the initial migration baseline. If a database already
+        exists, delegates to migrate_db.apply_migrations() to apply any
+        pending incremental changes.
 
 To wipe and rebuild from scratch:
     rm ~/claude_memory/memory.db
     python3 setup_db.py
 
-Schema version: 2.2
-Changes from v2.1:
-    - Added memory_objects registry table (auto-populated via SQLite triggers)
-    - Added content_fingerprints table for deduplication
-    - Added token_usage table for cost tracking
-    - Extended memory_relationships: source_uuid, target_uuid, directionality, weight, valid_from, valid_to
-    - Extended beliefs/epiphanies: extraction_version, last_processed_at, confidence_calibrated
-    - Extended reflections/patterns: extraction_version, last_processed_at
-    - Extended processing_jobs: retry_count, last_heartbeat
-    - Extended tensions: tension_cluster_id
-    - Added SQLite triggers to auto-populate memory_objects on INSERT
-    - Added indexes for new tables and fields
-    Total tables: 31 core + 3 join tables
+To migrate an existing database:
+    python3 setup_db.py                  # auto-detects existing DB, runs migrations
+    python3 scripts/migrate_db.py        # migration runner directly
+    python3 scripts/migrate_db.py --status
+
+Schema version: 2.8.0 (current)
+Versions:
+    2.2  baseline (April 2026)
+    2.3  user_id/agent_id on core tables; conversations source fields
+    2.4  trusted_sources table
+    2.5  scout_results table with challenge_score
+    2.6  quarantine_reason on beliefs; needs_review status
+    2.7  source_url, source_fetched_at, processing_job_id on memory_provenance
+    2.8  memory_origin on concepts, entities, patterns, questions
 """
 
 import sqlite3
@@ -30,12 +42,36 @@ from pathlib import Path
 
 DB_PATH = os.path.expanduser("~/claude_memory/memory.db")
 
+CURRENT_SCHEMA_VERSION = "2.8.0"
 
-def setup_database():
-    conn = sqlite3.connect(DB_PATH)
+
+def create_latest_schema(conn: sqlite3.Connection) -> None:
+    """
+    Create all tables, triggers, indexes, and seed data for a fresh install.
+
+    This function is idempotent (uses CREATE TABLE IF NOT EXISTS) but is
+    intended for first-run only. Existing databases should use migrate_db.py.
+    """
     c = conn.cursor()
-
     c.execute("PRAGMA foreign_keys = ON")
+
+    # ── schema_migrations ──────────────────────────────────────────────────────
+    # Formal migration tracking table. Controls the run_migrations() path.
+    # Never populated by this function directly; seeded by main() after
+    # create_latest_schema() completes to record the baseline version.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            version    TEXT UNIQUE NOT NULL,
+            name       TEXT,
+            applied_at TEXT NOT NULL,
+            checksum   TEXT
+        )
+    """)
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_schema_migrations_version
+        ON schema_migrations (version)
+    """)
 
     # ── 1. conversations ───────────────────────────────────────────────────────
     c.execute("""
@@ -56,6 +92,11 @@ def setup_database():
             memory_origin    TEXT DEFAULT 'conversation',
             tags             TEXT,
             raw_export       TEXT,
+            source_filename  TEXT,
+            source_hash      TEXT,
+            source_timestamp TEXT,
+            user_id          TEXT DEFAULT 'bobby',
+            agent_id         TEXT DEFAULT 'claude',
             created_at       TEXT,
             updated_at       TEXT
         )
@@ -95,6 +136,9 @@ def setup_database():
             memory_origin            TEXT DEFAULT 'conversation',
             source_conversation_id   INTEGER,
             tags                     TEXT,
+            quarantine_reason        TEXT,
+            user_id                  TEXT,
+            agent_id                 TEXT,
             created_at               TEXT,
             updated_at               TEXT
         )
@@ -137,32 +181,34 @@ def setup_database():
     # ── 5. epiphanies ──────────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS epiphanies (
-            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-            uuid                 TEXT UNIQUE,
-            date                 TEXT,
-            description          TEXT,
-            conversation_id      INTEGER,
-            concept_id           INTEGER,
-            preceded_by          TEXT,
-            implications         TEXT,
-            checksum_status      TEXT,
-            confidence_score     REAL DEFAULT 0.5,
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid                  TEXT UNIQUE,
+            date                  TEXT,
+            description           TEXT,
+            conversation_id       INTEGER,
+            concept_id            INTEGER,
+            preceded_by           TEXT,
+            implications          TEXT,
+            checksum_status       TEXT,
+            confidence_score      REAL DEFAULT 0.5,
             confidence_calibrated INTEGER DEFAULT 0,
-            evidence_snippets    TEXT,
-            verbatim_anchor      TEXT,
-            source_type          TEXT DEFAULT 'model_inference',
-            is_active            INTEGER DEFAULT 1,
-            archived_at          TEXT,
-            importance_score     REAL DEFAULT 0.5,
-            valid_from           TEXT,
-            valid_to             TEXT,
-            version              INTEGER DEFAULT 1,
-            extraction_version   INTEGER DEFAULT 1,
-            last_processed_at    TEXT,
-            memory_origin        TEXT DEFAULT 'conversation',
-            tags                 TEXT,
-            created_at           TEXT,
-            updated_at           TEXT
+            evidence_snippets     TEXT,
+            verbatim_anchor       TEXT,
+            source_type           TEXT DEFAULT 'model_inference',
+            is_active             INTEGER DEFAULT 1,
+            archived_at           TEXT,
+            importance_score      REAL DEFAULT 0.5,
+            valid_from            TEXT,
+            valid_to              TEXT,
+            version               INTEGER DEFAULT 1,
+            extraction_version    INTEGER DEFAULT 1,
+            last_processed_at     TEXT,
+            memory_origin         TEXT DEFAULT 'conversation',
+            user_id               TEXT,
+            agent_id              TEXT,
+            tags                  TEXT,
+            created_at            TEXT,
+            updated_at            TEXT
         )
     """)
 
@@ -178,6 +224,8 @@ def setup_database():
             compressed_context_version TEXT,
             conversation_ids           TEXT,
             tags                       TEXT,
+            user_id                    TEXT,
+            agent_id                   TEXT,
             created_at                 TEXT,
             updated_at                 TEXT
         )
@@ -186,7 +234,6 @@ def setup_database():
     # ── 7. concepts ────────────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS concepts (
-            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
             name               TEXT,
             description        TEXT,
             first_appeared     TEXT,
@@ -195,7 +242,10 @@ def setup_database():
             related_epiphanies TEXT,
             evolution_notes    TEXT,
             memory_origin      TEXT DEFAULT 'conversation',
+            user_id            TEXT,
+            agent_id           TEXT,
             tags               TEXT,
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at         TEXT,
             updated_at         TEXT
         )
@@ -214,6 +264,8 @@ def setup_database():
             related_conversations TEXT,
             notes                 TEXT,
             tags                  TEXT,
+            user_id               TEXT,
+            agent_id              TEXT,
             created_at            TEXT,
             updated_at            TEXT
         )
@@ -231,6 +283,8 @@ def setup_database():
             importance       TEXT,
             notes            TEXT,
             memory_origin    TEXT DEFAULT 'conversation',
+            user_id          TEXT,
+            agent_id         TEXT,
             tags             TEXT,
             created_at       TEXT,
             updated_at       TEXT
@@ -240,25 +294,25 @@ def setup_database():
     # ── 10. tensions ───────────────────────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS tensions (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            topic             TEXT,
-            belief_a_id       INTEGER,
-            belief_b_id       INTEGER,
-            description       TEXT,
-            date_identified   TEXT,
-            resolution        TEXT,
-            resolution_notes  TEXT,
-            resolved_date     TEXT,
-            confidence_score  REAL,
-            is_active         INTEGER DEFAULT 1,
-            archived_at       TEXT,
-            importance_score  REAL DEFAULT 0.5,
-            valid_from        TEXT,
-            valid_to          TEXT,
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic              TEXT,
+            belief_a_id        INTEGER,
+            belief_b_id        INTEGER,
+            description        TEXT,
+            date_identified    TEXT,
+            resolution         TEXT,
+            resolution_notes   TEXT,
+            resolved_date      TEXT,
+            confidence_score   REAL,
+            is_active          INTEGER DEFAULT 1,
+            archived_at        TEXT,
+            importance_score   REAL DEFAULT 0.5,
+            valid_from         TEXT,
+            valid_to           TEXT,
             tension_cluster_id TEXT,
-            tags              TEXT,
-            created_at        TEXT,
-            updated_at        TEXT
+            tags               TEXT,
+            created_at         TEXT,
+            updated_at         TEXT
         )
     """)
 
@@ -336,6 +390,8 @@ def setup_database():
             related_beliefs        TEXT,
             related_concepts       TEXT,
             memory_origin          TEXT DEFAULT 'conversation',
+            user_id                TEXT,
+            agent_id               TEXT,
             tags                   TEXT,
             created_at             TEXT,
             updated_at             TEXT
@@ -353,6 +409,8 @@ def setup_database():
             notable_moments TEXT,
             bobby_state     TEXT,
             claude_state    TEXT,
+            user_id         TEXT,
+            agent_id        TEXT,
             tags            TEXT,
             created_at      TEXT
         )
@@ -380,6 +438,8 @@ def setup_database():
             extraction_version    INTEGER DEFAULT 1,
             last_processed_at     TEXT,
             memory_origin         TEXT DEFAULT 'conversation',
+            user_id               TEXT,
+            agent_id              TEXT,
             tags                  TEXT,
             created_at            TEXT
         )
@@ -410,12 +470,16 @@ def setup_database():
             from_whom               TEXT,
             related_conversation_id INTEGER,
             impact                  TEXT,
+            user_id                 TEXT,
+            agent_id                TEXT,
             tags                    TEXT,
             created_at              TEXT
         )
     """)
 
     # ── 19. schema_evolution ───────────────────────────────────────────────────
+    # Narrative log of architectural decisions. Complements schema_migrations
+    # (which tracks applied SQL changes) with the reasoning behind them.
     c.execute("""
         CREATE TABLE IF NOT EXISTS schema_evolution (
             id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -468,6 +532,9 @@ def setup_database():
             originating_chunk_id        INTEGER,
             extraction_model            TEXT,
             extraction_prompt_hash      TEXT,
+            source_url                  TEXT,
+            source_fetched_at           TEXT,
+            processing_job_id           INTEGER,
             created_at                  TEXT
         )
     """)
@@ -567,7 +634,7 @@ def setup_database():
         )
     """)
 
-    # ── 26. conversation_participants ──────────────────────────────────────────
+    # ── 26b. conversation_participants ─────────────────────────────────────────
     c.execute("""
         CREATE TABLE IF NOT EXISTS conversation_participants (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -620,13 +687,13 @@ def setup_database():
     # permissions (future), and ecosystem tooling.
     c.execute("""
         CREATE TABLE IF NOT EXISTS memory_objects (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            uuid          TEXT UNIQUE,
-            memory_type   TEXT,
-            table_name    TEXT,
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid             TEXT UNIQUE,
+            memory_type      TEXT,
+            table_name       TEXT,
             importance_score REAL DEFAULT 0.5,
-            is_active     INTEGER DEFAULT 1,
-            created_at    TEXT
+            is_active        INTEGER DEFAULT 1,
+            created_at       TEXT
         )
     """)
 
@@ -648,8 +715,6 @@ def setup_database():
     # ── 31. token_usage ────────────────────────────────────────────────────────
     # Tracks token consumption per task and model.
     # Critical for open-source users comparing local vs cloud costs.
-    # task_type: conversation_extraction | embedding | research |
-    #            verification | retrieval | snapshot
     c.execute("""
         CREATE TABLE IF NOT EXISTS token_usage (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -663,9 +728,8 @@ def setup_database():
         )
     """)
 
-    # ── 32. session_intent_log ────────────────────────────────────────────────
-    # Persists every Tier 0 classification result so session intent history is
-    # queryable. Written by tier0_classifier.py on each classify_session() call.
+    # ── 32. session_intent_log ─────────────────────────────────────────────────
+    # Persists every Tier 0 classification result.
     # triggered_by: 'ingest' | 'manual' | 'refresh_deep_memory' | 'unknown'
     c.execute("""
         CREATE TABLE IF NOT EXISTS session_intent_log (
@@ -683,6 +747,63 @@ def setup_database():
             notes        TEXT,
             triggered_by TEXT,
             created_at   TEXT
+        )
+    """)
+
+    # ── 33. trusted_sources ────────────────────────────────────────────────────
+    # Research pipeline: approved YouTube channels and publications.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trusted_sources (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type   TEXT    NOT NULL DEFAULT 'youtube_channel',
+            channel_id    TEXT,
+            channel_name  TEXT,
+            channel_url   TEXT,
+            topic_focus   TEXT,
+            quality_notes TEXT,
+            date_added    TEXT,
+            approved_by   TEXT    DEFAULT 'user',
+            is_active     INTEGER DEFAULT 1,
+            notes         TEXT,
+            created_at    TEXT    DEFAULT (datetime('now'))
+        )
+    """)
+
+    # ── 34. scout_results ──────────────────────────────────────────────────────
+    # Research Scout output. Relevance-scored papers and videos queued for
+    # curator review. challenge_score measures divergence from project vector,
+    # allowing users to distinguish confirming vs challenging material.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS scout_results (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            uuid             TEXT NOT NULL DEFAULT (
+                lower(hex(randomblob(4)) || '-' ||
+                hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)),2) ||
+                '-' || substr('89ab', abs(random()) % 4 + 1, 1) ||
+                substr(hex(randomblob(2)),2) || '-' || hex(randomblob(6)))),
+            title            TEXT,
+            authors          TEXT,
+            abstract         TEXT,
+            doi              TEXT,
+            source_url       TEXT,
+            source_name      TEXT,
+            source_type      TEXT,
+            publication_date TEXT,
+            external_id      TEXT,
+            date_fetched     TEXT NOT NULL DEFAULT (date('now')),
+            search_query     TEXT,
+            search_ring      INTEGER,
+            triggered_by     TEXT,
+            relevance_score  REAL,
+            relevance_notes  TEXT,
+            status           TEXT NOT NULL DEFAULT 'pending',
+            curator_notes    TEXT,
+            promoted_to      TEXT,
+            reviewed_at      TEXT,
+            tags             TEXT,
+            challenge_score  REAL,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
         )
     """)
 
@@ -711,31 +832,9 @@ def setup_database():
         )
     """)
 
-    # ── Research sources: trusted channels and publications ────────────────────
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS trusted_sources (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_type   TEXT    NOT NULL DEFAULT 'youtube_channel',
-            channel_id    TEXT,
-            channel_name  TEXT,
-            channel_url   TEXT,
-            topic_focus   TEXT,
-            quality_notes TEXT,
-            date_added    TEXT,
-            approved_by   TEXT    DEFAULT 'user',
-            is_active     INTEGER DEFAULT 1,
-            notes         TEXT,
-            created_at    TEXT    DEFAULT (datetime('now'))
-        )
-    """)
-    c.execute("CREATE INDEX IF NOT EXISTS idx_trusted_sources_type     ON trusted_sources (source_type)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_trusted_sources_active   ON trusted_sources (is_active)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_trusted_sources_channel  ON trusted_sources (channel_id)")
-
     # ── SQLite triggers: auto-populate memory_objects ──────────────────────────
     # These triggers fire after every INSERT on a tracked memory table.
     # The registry stays consistent without any application-level maintenance.
-
     trigger_tables = [
         ("beliefs",       "belief",       "uuid", "importance_score"),
         ("epiphanies",    "epiphany",     "uuid", "importance_score"),
@@ -768,7 +867,6 @@ def setup_database():
         """)
 
     # ── performance indexes ────────────────────────────────────────────────────
-
     indexes = [
         # beliefs
         "CREATE INDEX IF NOT EXISTS idx_beliefs_status        ON beliefs(status, is_active)",
@@ -815,6 +913,8 @@ def setup_database():
         "CREATE INDEX IF NOT EXISTS idx_jobs_status           ON processing_jobs(status, job_type)",
         # provenance
         "CREATE INDEX IF NOT EXISTS idx_provenance_type       ON memory_provenance(memory_type, memory_id)",
+        "CREATE INDEX IF NOT EXISTS idx_provenance_job        ON memory_provenance(processing_job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_provenance_url        ON memory_provenance(source_url)",
         # memory_objects registry
         "CREATE INDEX IF NOT EXISTS idx_objects_uuid          ON memory_objects(uuid)",
         "CREATE INDEX IF NOT EXISTS idx_objects_type          ON memory_objects(memory_type, is_active)",
@@ -824,12 +924,26 @@ def setup_database():
         # token usage
         "CREATE INDEX IF NOT EXISTS idx_tokens_model          ON token_usage(model_name, task_type)",
         "CREATE INDEX IF NOT EXISTS idx_tokens_job            ON token_usage(processing_job_id)",
+        # trusted_sources
+        "CREATE INDEX IF NOT EXISTS idx_trusted_sources_type    ON trusted_sources (source_type)",
+        "CREATE INDEX IF NOT EXISTS idx_trusted_sources_active  ON trusted_sources (is_active)",
+        "CREATE INDEX IF NOT EXISTS idx_trusted_sources_channel ON trusted_sources (channel_id)",
+        # scout_results
+        "CREATE INDEX IF NOT EXISTS idx_scout_status    ON scout_results (status)",
+        "CREATE INDEX IF NOT EXISTS idx_scout_relevance ON scout_results (relevance_score)",
+        "CREATE INDEX IF NOT EXISTS idx_scout_date      ON scout_results (date_fetched)",
+        "CREATE INDEX IF NOT EXISTS idx_scout_source    ON scout_results (source_type, source_name)",
     ]
 
     for idx in indexes:
         c.execute(idx)
 
-    # ── seed primary user ─────────────────────────────────────────────────────
+    conn.commit()
+
+
+def _seed_data(conn: sqlite3.Connection) -> None:
+    """Seed primary user, founding agents, and schema evolution entry."""
+    c = conn.cursor()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     # Read username from .ember_config if available; fall back to 'user'
@@ -855,44 +969,22 @@ def setup_database():
         now, now,
     ))
 
-    # ── seed founding agents ───────────────────────────────────────────────────
+    for name, atype, desc in [
+        (_username, "human",
+         "Primary human collaborator and founder of this memory system."),
+        ("Claude",  "ai",
+         "Anthropic Claude. AI partner and cognitive layer "
+         "of this persistent memory architecture."),
+        ("Qwen",    "ai",
+         "Qwen 2.5 running locally via Ollama. "
+         "Handles background extraction and processing at zero token cost."),
+    ]:
+        c.execute("""
+            INSERT OR IGNORE INTO agents
+                (uuid, name, type, description, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (str(uuid_lib.uuid4()), name, atype, desc, 1, now))
 
-    c.execute("""
-        INSERT OR IGNORE INTO agents (uuid, name, type, description, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        str(uuid_lib.uuid4()),
-        _username,
-        "human",
-        "Primary human collaborator and founder of this memory system.",
-        1, now
-    ))
-
-    c.execute("""
-        INSERT OR IGNORE INTO agents (uuid, name, type, description, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        str(uuid_lib.uuid4()),
-        "Claude",
-        "ai",
-        "Anthropic Claude. AI partner and cognitive layer "
-        "of this persistent memory architecture.",
-        1, now
-    ))
-
-    c.execute("""
-        INSERT OR IGNORE INTO agents (uuid, name, type, description, is_active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        str(uuid_lib.uuid4()),
-        "Qwen",
-        "ai",
-        "Qwen 2.5 32B running locally via Ollama. "
-        "Handles background extraction and processing at zero token cost.",
-        1, now
-    ))
-
-    # ── schema evolution log ───────────────────────────────────────────────────
     c.execute("""
         INSERT INTO schema_evolution
             (date, change_description, reason, tables_affected,
@@ -900,31 +992,52 @@ def setup_database():
         VALUES (?, ?, ?, ?, ?, ?)
     """, (
         now,
-        "Schema v2.2: added memory_objects registry with auto-population triggers, "
-        "content_fingerprints deduplication table, token_usage tracking table, "
-        "extended memory_relationships with UUID linking, directionality, weight "
-        "and temporal fields, added extraction_version and confidence_calibrated "
-        "to beliefs and epiphanies, added retry/heartbeat to processing_jobs, "
-        "tension_cluster_id to tensions, 37 performance indexes",
-        "Final pre-data schema. Designed for open-source release as cognitive layer "
-        "for continuous autonomous AI agents. Intended for integration with OpenClaw "
-        "as execution/runtime layer.",
-        "All tables (31 core + 3 join tables)",
+        f"Schema {CURRENT_SCHEMA_VERSION}: fresh install. "
+        "Full table set including schema_migrations for formal version tracking, "
+        "user_id/agent_id on all core tables, scout_results with challenge_score.",
+        "ember-engine open-source release. Designed as cognitive memory layer "
+        "for Claude CoWork. Integrates with OpenClaw as execution/runtime layer.",
+        "All tables",
         0,
-        2
+        1,
     ))
 
     conn.commit()
-    conn.close()
+    return _username
 
+
+def _seed_migrations_baseline(conn: sqlite3.Connection) -> None:
+    """
+    Mark all migrations as applied when creating a fresh DB.
+
+    A fresh install has all schema at current version by definition.
+    Recording them as applied prevents migrate_db.py from trying to
+    re-run them on an already-correct schema.
+    """
+    from migrate_db import MIGRATIONS, _checksum
+    now = datetime.now().isoformat()
+    c = conn.cursor()
+    for mig in MIGRATIONS:
+        chk = _checksum(mig["statements"])
+        c.execute(
+            "INSERT OR IGNORE INTO schema_migrations "
+            "(version, name, applied_at, checksum) VALUES (?, ?, ?, ?)",
+            (mig["version"], mig["name"], now, chk),
+        )
+    conn.commit()
+
+
+def _print_summary(username: str) -> None:
     print(f"Memory database initialized at {DB_PATH}")
-    print(f"Timestamp: {now}")
-    print(f"Schema version: 2.2")
+    print(f"Schema version: {CURRENT_SCHEMA_VERSION}")
     print()
-    print("Tables (31 core + 3 join tables):")
+    print("Tables (34 core + 3 join tables + 1 migration tracking):")
+    print()
+    print("  Migration tracking:")
+    print("    0.  schema_migrations    [version, name, applied_at, checksum]")
     print()
     print("  Core memory:")
-    print("    1.  conversations")
+    print("    1.  conversations        [source provenance, user/agent identity]")
     print("    2.  beliefs              [confidence scoring, lifecycle, versioning, calibration]")
     print("    3.  epiphanies           [confidence scoring, versioning, calibration]")
     print("    4.  position_history     [state transitions]")
@@ -941,8 +1054,8 @@ def setup_database():
     print("    11. sources")
     print("    12. research_tasks")
     print("    13. tensions             [+cluster_id]")
-    print("    14. patterns")
-    print("    15. questions")
+    print("    14. patterns             [+user/agent identity]")
+    print("    15. questions            [+user/agent identity]")
     print()
     print("  Graph and relationships:")
     print("    16. memory_relationships [UUID-based, directed/weighted, temporal]")
@@ -951,37 +1064,71 @@ def setup_database():
     print("    19. reflection_chunk_links")
     print()
     print("  Identity and collaboration:")
-    print("    20. agents               [Bobby, Claude, Qwen seeded]")
-    print("    21. conversation_participants")
+    print("    20. agents               [seeded: user, Claude, Qwen]")
+    print("    21. users                [seeded from .ember_config]")
+    print("    22. conversation_participants")
     print()
     print("  Ingestion and artifacts:")
-    print("    22. artifacts")
-    print("    23. processing_jobs      [+retry_count, last_heartbeat]")
+    print("    23. artifacts")
+    print("    24. processing_jobs      [+retry_count, last_heartbeat, call_name, source_file]")
     print()
     print("  Observability and provenance:")
-    print("    24. memory_objects       [global registry, auto-populated by triggers]")
-    print("    25. content_fingerprints [deduplication layer]")
-    print("    26. token_usage          [cost tracking]")
-    print("    27. memory_provenance")
-    print("    28. retrieval_events")
-    print("    29. schema_evolution")
+    print("    25. memory_objects       [global registry, auto-populated by 8 triggers]")
+    print("    26. content_fingerprints [deduplication layer]")
+    print("    27. token_usage          [cost tracking]")
+    print("    28. memory_provenance")
+    print("    29. retrieval_events")
+    print("    30. schema_evolution     [architectural narrative log]")
     print()
     print("  Relationship and context:")
-    print("    30. goals")
-    print("    31. entities")
-    print("    32. moods")
-    print("    33. gratitude")
-    print("    34. boundaries")
+    print("    31. goals                [+user/agent identity]")
+    print("    32. entities             [+user/agent identity]")
+    print("    33. moods                [+user/agent identity]")
+    print("    34. gratitude            [+user/agent identity]")
+    print("    35. boundaries")
     print()
     print("  Research pipeline:")
-    print("    35. trusted_sources      [YouTube channels, publications, approved sources]")
+    print("    36. trusted_sources      [YouTube channels, publications]")
+    print("    37. scout_results        [Research Scout output, challenge_score]")
+    print("    38. session_intent_log   [Tier 0 classification history]")
     print()
     print("  Triggers: 8 (auto-populate memory_objects registry)")
-    print("  Indexes:  40")
-    print(f"  Founding agents seeded: {_username}, Claude, Qwen")
+    print(f"  Indexes:  {44}")
+    print(f"  Founding agents seeded: {username}, Claude, Qwen")
     print()
-    print("Schema v2.2 complete. Ready for rebuild.")
+    print(f"Schema {CURRENT_SCHEMA_VERSION} complete. Ready for first session.")
+
+
+def main() -> None:
+    db_path = Path(DB_PATH)
+
+    if db_path.exists():
+        # Existing database: run incremental migrations only.
+        # Do not touch tables that already contain data.
+        print(f"Database found at {DB_PATH}")
+        print("Running incremental migrations...\n")
+        import migrate_db
+        n = migrate_db.apply_migrations(db_path)
+        if n == 0:
+            print("\nAll migrations already applied. Schema is current.")
+        else:
+            print(f"\n{n} migration(s) applied. Schema updated to {CURRENT_SCHEMA_VERSION}.")
+        return
+
+    # Fresh install: create full schema, seed data, record baseline migrations.
+    print(f"Creating new database at {DB_PATH}")
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        create_latest_schema(conn)
+        username = _seed_data(conn)
+        _seed_migrations_baseline(conn)
+        conn.close()
+        _print_summary(username)
+    except Exception:
+        conn.close()
+        db_path.unlink(missing_ok=True)
+        raise
 
 
 if __name__ == "__main__":
-    setup_database()
+    main()

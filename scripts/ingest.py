@@ -184,7 +184,7 @@ def check_schema_version(log=None):
                 f"Schema version mismatch. ingest.py requires {REQUIRED_SCHEMA_VERSION} "
                 f"but the database appears to be on v2.2.\n"
                 f"Run the migration first:\n"
-                f"  python3 ~/claude_memory/scripts/migrate_schema_v2_3.py\n"
+                f"  python3 ~/claude_memory/scripts/migrate_db.py\n"
                 f"Then re-run ingest.py."
             )
             if log:
@@ -528,7 +528,7 @@ def run_post_processing(log, dry_run=False):
 
     # Step 4: Embed new memory objects
     log.write("")
-    log.write("Step 4/7: embed_memories.py")
+    log.write("Step 4/8: embed_memories.py")
     rc = run_script("embed_memories.py", [], log, dry_run=dry_run)
     if rc != 0:
         log.write(f"WARNING: embed_memories.py failed (exit code {rc}).")
@@ -536,7 +536,7 @@ def run_post_processing(log, dry_run=False):
 
     # Step 5: Verify beliefs against source conversations (requires Ollama / DeepSeek R1)
     log.write("")
-    log.write("Step 5/7: verify_beliefs.py")
+    log.write("Step 5/8: verify_beliefs.py")
     if dry_run or is_ollama_running():
         rc = run_script("verify_beliefs.py", ["--limit", "20", "--check-contradictions"], log, dry_run=dry_run)
         if rc != 0:
@@ -552,7 +552,7 @@ def run_post_processing(log, dry_run=False):
     # against external sources." Writes to research_tasks (pending or fulfilled).
     # Does not require Ollama — keyword fallback is used if embeddings unavailable.
     log.write("")
-    log.write("Step 5.5/7: belief_checksum.py")
+    log.write("Step 5.5/8: belief_checksum.py")
     rc = run_script("belief_checksum.py", ["--recency-days", "3"], log, dry_run=dry_run)
     if rc != 0:
         log.write(f"WARNING: belief_checksum.py failed (exit code {rc}).")
@@ -560,7 +560,7 @@ def run_post_processing(log, dry_run=False):
 
     # Step 6: Regenerate context snapshot
     log.write("")
-    log.write("Step 6/7: refresh_recent_memory.py")
+    log.write("Step 6/8: refresh_recent_memory.py")
     rc = run_script("refresh_recent_memory.py", [], log, dry_run=dry_run)
     if rc != 0:
         log.write(f"WARNING: refresh_recent_memory.py failed (exit code {rc}).")

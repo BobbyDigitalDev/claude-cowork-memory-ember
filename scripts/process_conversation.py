@@ -7,7 +7,7 @@ Takes a conversation .md file, sends sections to Qwen 2.5 32B running
 locally via Ollama, extracts structured memory data, and writes it into
 the appropriate tables in memory.db.
 
-Compatible with schema v2.0.
+Compatible with schema v2.8.0.
 
 Usage:
     python3 ~/claude_memory/scripts/process_conversation.py conversation_001.md
@@ -55,6 +55,43 @@ MODEL   = MODEL_EXTRACTION  # active model for this script
 NUM_CTX = 65536  # 64K tokens. Covers ~240K chars with headroom. Was 131072 (128K) but prefill
                  # cost scales quadratically -- halving context window roughly 4x speeds prefill.
 
+# ── Quarantine thresholds ───────────────────────────────────────────────────────
+# Beliefs failing any of these checks are written with status='needs_review'
+# instead of 'proposed', and quarantine_reason is populated with the cause.
+# Reviewer: python3 ~/claude_memory/scripts/review_quarantine.py
+
+QUARANTINE_MIN_CONFIDENCE = 0.40   # beliefs below this score are weakly-grounded
+QUARANTINE_REQUIRE_ANCHOR = True   # beliefs with no verbatim anchor are flagged
+
+
+def _quarantine_check(
+    confidence_score: float,
+    verbatim_anchor: str | None,
+    evidence_snippets_str: str,
+) -> tuple[str, str | None]:
+    """
+    Evaluate whether a newly-extracted belief should be quarantined.
+
+    Returns (status, quarantine_reason):
+        ('proposed',     None)            belief passes all checks
+        ('needs_review', '<reason>')      belief is weakly-grounded
+    """
+    reasons = []
+
+    if confidence_score < QUARANTINE_MIN_CONFIDENCE:
+        reasons.append(f"low confidence ({confidence_score:.2f})")
+
+    if QUARANTINE_REQUIRE_ANCHOR and not verbatim_anchor:
+        reasons.append("no verbatim anchor")
+
+    # Empty evidence: '[]', '', or None
+    if not evidence_snippets_str or evidence_snippets_str in ("[]", "null", "None"):
+        reasons.append("no evidence snippets")
+
+    if reasons:
+        return "needs_review", "; ".join(reasons)
+    return "proposed", None
+
 
 # ── Ollama interface ────────────────────────────────────────────────────────────
 
@@ -86,7 +123,7 @@ def ask_qwen(prompt, task_type="extraction"):
         )
         return data.get("response", "").strip()
     except requests.exceptions.ConnectionError:
-        print("ERROR: Cannot reach Ollama. Make sure Qwen is running (ollama run qwen2.5:32b)")
+        print(f"ERROR: Cannot reach Ollama. Make sure Qwen is running (ollama run {MODEL_EXTRACTION})")
         sys.exit(1)
     except requests.exceptions.Timeout:
         print("ERROR: Ollama timed out.")
@@ -1005,20 +1042,42 @@ def _write_messages(c, conv_id, conv_text, session_date, now):
     print(f"  Writing to messages table... {inserted} new message(s) ({len(messages)} total parsed)")
 
 
-def write_provenance(c, memory_type, memory_id, conv_id, prompt_text, now):
-    """Write a provenance record for any extracted memory entry."""
+def write_provenance(
+    c,
+    memory_type: str,
+    memory_id: int,
+    conv_id: int,
+    prompt_text: str,
+    now: str,
+    *,
+    source_url: str | None = None,
+    source_fetched_at: str | None = None,
+    processing_job_id: int | None = None,
+) -> None:
+    """Write a provenance record for any extracted memory entry.
+
+    Keyword-only args (all optional):
+        source_url          URL of the external source (for research ingestion)
+        source_fetched_at   ISO timestamp when the source was fetched
+        processing_job_id   ID of the processing_jobs row that produced this memory
+    """
     c.execute("""
         INSERT INTO memory_provenance
             (memory_type, memory_id, originating_conversation_id,
-             extraction_model, extraction_prompt_hash, created_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+             extraction_model, extraction_prompt_hash,
+             source_url, source_fetched_at, processing_job_id,
+             created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         memory_type,
         memory_id,
         conv_id,
         MODEL,
         prompt_hash(prompt_text),
-        now
+        source_url,
+        source_fetched_at,
+        processing_job_id,
+        now,
     ))
 
 
@@ -1409,22 +1468,30 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
         snippets = belief.get("evidence_snippets", [])
         snippets_str = json.dumps(snippets) if isinstance(snippets, list) else str(snippets)
         verbatim_anchor = find_verbatim_anchor(snippets, conv_text)
+        b_confidence_score = belief.get("confidence_score", 0.7)
+        b_status, b_quarantine_reason = _quarantine_check(
+            b_confidence_score, verbatim_anchor, snippets_str
+        )
+        if b_status == "needs_review":
+            print(f"    [quarantine] {belief.get('topic', '')[:50]} — {b_quarantine_reason}")
         c.execute("""
             INSERT INTO beliefs
                 (uuid, topic, position, confidence, confidence_score, evidence_snippets,
-                 verbatim_anchor, source_type, status, origin, last_updated, valid_from,
-                 version, source_conversation_id, last_processed_at, tags, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 verbatim_anchor, source_type, status, quarantine_reason, origin,
+                 last_updated, valid_from, version, source_conversation_id,
+                 last_processed_at, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             b_uuid,
             belief.get("topic", ""),
             belief.get("position", ""),
             belief.get("confidence", "medium"),
-            belief.get("confidence_score", 0.7),
+            b_confidence_score,
             snippets_str,
             verbatim_anchor,
             belief.get("source_type", "model_inference"),
-            "proposed",
+            b_status,
+            b_quarantine_reason,
             belief.get("origin", ""),
             today,
             today,
@@ -1503,6 +1570,8 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
             now, now
         ))
         q_id = c.lastrowid
+        if q_id:
+            write_provenance(c, "question", q_id, conv_id, prompts.get("questions", ""), now)
         if q_id and q_text.strip():
             session_question_ids.append((q_id, q_text))
 
@@ -1527,6 +1596,9 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
             _to_str(goal.get("tags", "")),
             now, now
         ))
+        goal_id = c.lastrowid
+        if goal_id:
+            write_provenance(c, "goal", goal_id, conv_id, prompts.get("goals", ""), now)
 
     # ── entities ──────────────────────────────────────────────────────────────
     print("  Writing to entities table...")
@@ -1549,6 +1621,9 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
             _to_str(entity.get("tags", "")),
             now, now
         ))
+        entity_id = c.lastrowid
+        if entity_id:
+            write_provenance(c, "entity", entity_id, conv_id, prompts.get("entities", ""), now)
 
     # ── concepts ──────────────────────────────────────────────────────────────
     print("  Writing to concepts table...")
@@ -1579,6 +1654,8 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
             now, now
         ))
         c_id = c.lastrowid
+        if c_id:
+            write_provenance(c, "concept", c_id, conv_id, prompts.get("concepts", ""), now)
         if c_id and (c_name.strip() or c_desc.strip()):
             session_concept_ids.append((c_id, c_name, c_desc))
 
@@ -1705,6 +1782,9 @@ def write_to_db(session_id, conv_id, extractions, prompts, conv_text, filename, 
             _to_str(pattern.get("tags", "")),
             now
         ))
+        pattern_id = c.lastrowid
+        if pattern_id:
+            write_provenance(c, "pattern", pattern_id, conv_id, prompts.get("patterns", ""), now)
 
     # ── epiphany → belief relationships ──────────────────────────────────────
     if session_epiphany_ids and session_belief_ids:
@@ -1798,7 +1878,7 @@ def process_conversation(filename, override_date=None, mode="individual", dry_ru
     print(f"Processing: {filename}")
     print(f"Started:    {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Model:      {MODEL}")
-    print(f"Schema:     v2.2")
+    print(f"Schema:     v2.8.0")
     print(f"Mode:       {mode} ({'10 calls' if mode == 'individual' else '3 grouped calls'})")
     print(f"{'='*60}\n")
 

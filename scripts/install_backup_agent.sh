@@ -44,7 +44,11 @@ if [ ! -f "$PLIST_SRC" ]; then
     echo "  ERROR: $PLIST_SRC not found."
     exit 1
 fi
-sed "s|__INSTALL_DIR__|$HOME/claude_memory|g" "$PLIST_SRC" > "$PLIST_DEST"
+PYTHON3=$(which python3 2>/dev/null || echo "/usr/bin/python3")
+sed \
+    -e "s|__INSTALL_DIR__|$HOME/claude_memory|g" \
+    -e "s|__PYTHON3__|$PYTHON3|g" \
+    "$PLIST_SRC" > "$PLIST_DEST"
 echo "  OK: $PLIST_DEST"
 
 # 4. Load agent

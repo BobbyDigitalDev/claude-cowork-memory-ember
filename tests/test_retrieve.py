@@ -15,10 +15,11 @@ def seeded_db(tmp_path):
     """Temp DB with full schema and known seed data for deterministic tests."""
     import setup_db
     db_path = str(tmp_path / "test_memory.db")
-    orig = setup_db.DB_PATH
-    setup_db.DB_PATH = db_path
-    setup_db.setup_database()
-    setup_db.DB_PATH = orig
+    conn = sqlite3.connect(db_path)
+
+    setup_db.create_latest_schema(conn)
+
+    conn.close()
 
     conn = sqlite3.connect(db_path)
     c = conn.cursor()

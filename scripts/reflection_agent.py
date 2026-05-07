@@ -112,10 +112,10 @@ def load_recent_snapshots(conn, n_days=7, max_snapshots=10):
     c = conn.cursor()
     try:
         c.execute("""
-            SELECT id, snapshot_date, content, created_at
+            SELECT id, date, content, created_at
             FROM context_snapshots
-            WHERE snapshot_date >= ?
-            ORDER BY snapshot_date DESC
+            WHERE date >= ?
+            ORDER BY date DESC
             LIMIT ?
         """, (cutoff, max_snapshots))
         rows = c.fetchall()
@@ -313,6 +313,7 @@ def write_reflection(conn, result, period_start, period_end, n_sessions, dry_run
 
 def run(args):
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     now  = datetime.now()
 
     print(f"\n{'='*60}")

@@ -141,8 +141,9 @@ def get_triggered_beliefs(conn, limit, recency_days, conv_filter=None):
         # beliefs extracted from a specific conversation
         conv_clause = """
         AND b.id IN (
-            SELECT DISTINCT target_id FROM processing_jobs
-            WHERE target_type = 'belief' AND source_file = ?
+            SELECT mp.memory_id FROM memory_provenance mp
+            JOIN conversations c ON c.id = mp.originating_conversation_id
+            WHERE mp.memory_type = 'belief' AND c.source_filename = ?
         )"""
         params.append(conv_filter)
 

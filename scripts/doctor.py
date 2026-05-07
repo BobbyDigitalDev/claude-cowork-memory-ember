@@ -56,8 +56,8 @@ DAEMONS    = _BASE / "daemons"
 OLLAMA_URL = "http://localhost:11434"
 
 REQUIRED_PACKAGES = ["requests", "mcp"]
-REQUIRED_MODELS   = ["nomic-embed-text", "qwen2.5:14b"]
-OPTIONAL_MODELS   = ["deepseek-r1:14b"]
+REQUIRED_MODELS   = ["nomic-embed-text", "qwen2.5:14b", "deepseek-r1:14b"]
+OPTIONAL_MODELS   = []
 
 CRITICAL_SCHEMA = [
     ("processing_jobs", ["id", "source_file", "status", "created_at", "call_name"]),

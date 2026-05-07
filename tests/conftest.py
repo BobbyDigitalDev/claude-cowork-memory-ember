@@ -16,15 +16,16 @@ sys.path.insert(0, os.path.abspath(SCRIPTS_DIR))
 def tmp_db(tmp_path):
     """
     Spin up a temporary SQLite database with the full schema.
-    Uses setup_db.py's create_schema() so the test DB always
+    Uses setup_db.create_latest_schema() so the test DB always
     matches production.
     """
     import setup_db
     db_path = str(tmp_path / "test_memory.db")
-    original = setup_db.DB_PATH
-    setup_db.DB_PATH = db_path
-    setup_db.setup_database()
-    setup_db.DB_PATH = original
+    conn = sqlite3.connect(db_path)
+
+    setup_db.create_latest_schema(conn)
+
+    conn.close()
     return db_path
 
 

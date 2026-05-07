@@ -58,7 +58,7 @@ fi
 PYTHON3=$(which python3 2>/dev/null || echo "/opt/homebrew/bin/python3")
 sed \
     -e "s|__INSTALL_DIR__|$HOME/claude_memory|g" \
-    -e "s|/opt/homebrew/bin/python3|$PYTHON3|g" \
+    -e "s|__PYTHON3__|$PYTHON3|g" \
     "$PLIST_SRC" > "$PLIST_DST"
 launchctl load "$PLIST_DST"
 echo "  Agent registered: $PLIST_NAME"
